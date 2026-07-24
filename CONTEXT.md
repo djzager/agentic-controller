@@ -65,11 +65,9 @@ selection includes a role (e.g. primary, efficient) that the base
 image entrypoint maps to runtime-specific configuration. The
 controller validates that selected providers/models are in the
 Agent's available set, creates a Sandbox, and tracks status to
-completion. Parameters are domain-agnostic — the controller passes
-them through without interpretation. For Konveyor-managed agents,
-Hub injects connectivity info (`HUB_URL`, `HUB_APP_ID`, scoped API
-token) into the AgentRun's env at create time; the harness resolves
-application metadata from Hub at runtime.
+completion. Parameters are domain-agnostic — the Konveyor UI knows
+to populate Hub-specific params (APP_ID, HUB_BASE_URL, etc.) for
+migration use cases.
 
 **AgentPlaybookRun** — A request to execute an AgentPlaybook. References an
 AgentPlaybook (or inlines the spec) and carries generic parameters,
@@ -117,33 +115,9 @@ security policies, and inference routing. Complementary to Agent
 Sandbox, not a replacement.
 
 **Hub** — The Konveyor application inventory and analysis engine. In
-the agentic platform Hub serves two roles: (1) a CRUD gateway for
-agent CRDs, exposing REST endpoints under `/hub/agent/` backed by
-controller-runtime client — following the AddonHandler/ConfigMapHandler
-pattern; and (2) a runtime data service that the harness calls (via a
-scoped API token) to fetch application metadata, decrypted git
-credentials, and analysis results — the same role Hub plays for
-addons today. At AgentRun create time, Hub mints a scoped token and
-injects `HUB_URL`, `HUB_APP_ID`, and the token into the AgentRun's
-env/envFrom, then creates the CR. Hub does not resolve application
-data at create time — the harness resolves at runtime. Hub is
-fire-and-forget; it does not launch or manage agent workloads.
-
-**Harness** — The Go binary entrypoint in the agent base image,
-analogous to the addon adapter (`shared/addon/adapter`) in Hub. In
-Konveyor-managed mode (`HUB_URL` + `HUB_APP_ID` set), the harness
-acts as a Hub client: resolves the application's git URL, branch,
-and decrypted credentials from Hub, clones the repo, and configures
-the workspace so the agent cannot push (credentials stay in the
-harness, not in the agent's env or git config). On exit (success or
-failure), the harness revokes its Hub API token. In standalone mode
-(no `HUB_URL`), the harness reads git coordinates from
-`KONVEYOR_PARAM_*` env vars and credentials from mounted Secrets. In
-both modes, the harness launches the agent runtime, commits work
-incrementally, and pushes to the target branch on exit. The harness
-is domain-specific — other platforms can provide their own harness
-for their use case. The controller is agnostic to which harness the
-base image carries.
+the agentic platform Hub serves as a data service: agents call its API
+at runtime to fetch analysis results, application metadata, and git
+credentials. Hub does not launch or manage agent workloads.
 
 **Memory Service** — A persistent, queryable knowledge base owned by
 an Agent, accessible via MCP. The agent reads from it at session
