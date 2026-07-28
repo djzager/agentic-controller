@@ -44,14 +44,14 @@ spawn subagents internally but this is not modeled in the CRD.
 _Avoid_: conflating Agent with AgentRun — Agent is a template,
 AgentRun is an invocation.
 
-**AgentPlaybook** — A reusable playbook combining a high-level guide with
+**AgentWorkflow** — A reusable workflow combining a high-level guide with
 an ordered sequence of stages. Each stage references an Agent and
 carries instructions. Stages execute sequentially, each getting a
 fresh agent session in its own Sandbox. Cross-stage continuity comes
 from committed handoff files on the shared target branch (e.g.
-`.konveyor/handoff.md`). The playbook's guide provides ambient context
+`.konveyor/handoff.md`). The workflow's guide provides ambient context
 written as a file in the workspace so each agent understands where its
-work fits in the bigger picture. An AgentPlaybook is a template —
+work fits in the bigger picture. An AgentWorkflow is a template —
 creating one does not execute anything. A future enhancement may
 introduce phases within stages for session continuity via shared PVCs.
 
@@ -63,11 +63,14 @@ environment variables into the sandbox). The controller validates
 that the selected gateway is in the Agent's gateway list and that the
 gateway Service exists, creates a sandbox through the OpenShell
 gateway API, and tracks status to completion. Parameters are
-domain-agnostic — the Konveyor UI knows to populate Hub-specific
-params (APP_ID, HUB_BASE_URL, etc.) for migration use cases.
+domain-agnostic — the controller passes them through without
+interpretation. For Konveyor-managed agents, Hub injects connectivity
+info (`HUB_BASE_URL`, `HUB_APP_ID`, scoped API token) into the
+AgentRun's env at create time; the harness resolves application
+metadata from Hub at runtime.
 
-**AgentPlaybookRun** — A request to execute an AgentPlaybook. References an
-AgentPlaybook (or inlines the spec) and carries generic parameters,
+**AgentWorkflowRun** — A request to execute an AgentWorkflow. References an
+AgentWorkflow (or inlines the spec) and carries generic parameters,
 a gateway selection, and env/envFrom. The controller orchestrates the
 execution: creates an AgentRun per stage sequentially (each using the
 selected gateway), all sharing the same target branch. Cross-stage
@@ -83,13 +86,13 @@ providers and inference routing on each gateway via the OpenShell CLI.
 Responsible for what capabilities and infrastructure are available to
 agents.
 
-**Architect / PM** — Creates Agents and AgentPlaybooks. Defines the
-playbook for how migrations (or other agentic work) should be
+**Architect / PM** — Creates Agents and AgentWorkflows. Defines the
+workflow for how migrations (or other agentic work) should be
 executed, which agents handle which phases, and what instructions
 each phase receives.
 
-**Developer** — Consumes Agents and AgentPlaybooks. Selects an application,
-picks an Agent or AgentPlaybook, runs it, and receives a branch with
+**Developer** — Consumes Agents and AgentWorkflows. Selects an application,
+picks an Agent or AgentWorkflow, runs it, and receives a branch with
 results.
 
 ## Infrastructure
@@ -140,9 +143,36 @@ _Avoid_: gateway (lowercase) when referring to Kubernetes Gateway API
 resources — always capitalize when referring to an OpenShell Gateway.
 
 **Hub** — The Konveyor application inventory and analysis engine. In
-the agentic platform Hub serves as a data service: agents call its API
-at runtime to fetch analysis results, application metadata, and git
-credentials. Hub does not launch or manage agent workloads.
+the agentic platform Hub serves two roles: (1) a CRUD gateway for
+agent CRDs, exposing REST endpoints under `/hub/agent/` backed by
+controller-runtime client — following the AddonHandler/ConfigMapHandler
+pattern; and (2) a runtime data service that the harness calls (via a
+scoped API token) to fetch application metadata, decrypted git
+credentials, and analysis results — the same role Hub plays for
+addons today. At AgentRun create time, Hub mints a scoped token and
+injects `HUB_BASE_URL`, `HUB_APP_ID`, and the token into the AgentRun's
+env/envFrom, then creates the CR. Hub does not resolve application
+data at create time — the harness resolves at runtime. Hub is
+fire-and-forget; it does not launch or manage agent workloads.
+
+**Harness** — The Go binary entrypoint in the agent base image,
+analogous to the addon adapter (`shared/addon/adapter`) in Hub. In
+Konveyor-managed mode (`HUB_BASE_URL` + `HUB_APP_ID` set), the harness
+acts as a Hub client: resolves the application's git URL, branch,
+and decrypted credentials from Hub, clones the repo, and configures
+the workspace so the agent cannot push (credentials stay in the
+harness, not in the agent's env or git config). On exit, the harness
+revokes its Hub API token — except in workflow stages where stages
+share a token; the harness revokes only on the last stage (determined
+via `KONVEYOR_WORKFLOW_STAGE` / `KONVEYOR_WORKFLOW_STAGE_COUNT` env
+vars injected by the controller). In standalone mode
+(no `HUB_BASE_URL`), the harness reads git coordinates from
+`KONVEYOR_PARAM_*` env vars and credentials from mounted Secrets. In
+both modes, the harness launches the agent runtime, commits work
+incrementally, and pushes to the target branch on exit. The harness
+is domain-specific — other platforms can provide their own harness
+for their use case. The controller is agnostic to which harness the
+base image carries.
 
 **Memory Service** — A persistent, queryable knowledge base owned by
 an Agent, accessible via MCP. The agent reads from it at session
@@ -164,9 +194,9 @@ service instance.
   declaring the set of provider/model combinations available for runs.
 - An **AgentRun** references one **Agent** and selects one **OpenShell
   Gateway** from the Agent's available set.
-- An **AgentPlaybook** organizes work into stages. Each stage
+- An **AgentWorkflow** organizes work into stages. Each stage
   references an **Agent** and carries instructions.
-- An **AgentPlaybookRun** references one **AgentPlaybook** (or inlines it)
+- An **AgentWorkflowRun** references one **AgentWorkflow** (or inlines it)
   and creates **AgentRun** CRs sequentially per stage.
 - At execution time, the plan's guide is written to the workspace as a
   context file. Each stage's instructions are joined with the Agent's
