@@ -12,7 +12,7 @@ Each stage was a Go package that constructed multi-turn ACP prompts from
 YAML recipe files and an embedded skill bundle. The harness owned both
 stage sequencing and migration intelligence.
 
-With the AgentPlaybookRun controller (ADR 0001) handling stage
+With the AgentWorkflowRun controller (ADR 0001) handling stage
 sequencing, the harness no longer needs orchestration logic. Meanwhile,
 the SkillCard CRD and OCI-based skill packaging provide a clean
 mechanism for delivering migration knowledge to agent pods at runtime.
@@ -45,7 +45,7 @@ patterns to apply. Its responsibilities are:
 8. Discover skills from `/opt/skills/*/SKILL.md` (glob)
 9. Build a single prompt from four context layers:
    - `KONVEYOR_PROMPT` — agent-level standing instructions
-   - `KONVEYOR_PLAYBOOK_INSTRUCTIONS` — playbook guide context
+   - `KONVEYOR_WORKFLOW_GUIDE` — workflow guide context
    - Skill content (concatenated from all discovered skills)
    - `KONVEYOR_INSTRUCTIONS` — stage-specific task
 10. Start a filesystem watcher for incremental push
@@ -289,7 +289,7 @@ reconciler that watches pod exit codes.
 
 - **Test harness scaffolding.** `hack/harness-test/setup.sh` builds
   skill OCI images locally, loads them into Kind, and applies
-  SkillCard + Agent + AgentPlaybook + AgentPlaybookRun CRs for
+  SkillCard + Agent + AgentWorkflow + AgentWorkflowRun CRs for
   end-to-end testing.
 
 

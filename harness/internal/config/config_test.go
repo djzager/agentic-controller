@@ -158,8 +158,8 @@ func TestLoadFromEnvReadsPromptLayers(t *testing.T) {
 	}
 }
 
-// #80 renames the env var; the harness reads either so merge order does not
-// matter. Remove with the fallback once #80 has landed everywhere.
+// The legacy env var KONVEYOR_PLAYBOOK_INSTRUCTIONS is still read as a
+// fallback. Remove this test when the fallback is dropped.
 func TestLoadFromEnvFallsBackToPlaybookInstructions(t *testing.T) {
 	clearKonveyorEnv(t)
 	setRequiredEnv(t)

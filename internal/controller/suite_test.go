@@ -148,15 +148,16 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = (&AgentPlaybookReconciler{
+	err = (&AgentWorkflowReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 
-	err = (&AgentPlaybookRunReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	err = (&AgentWorkflowRunReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("agentworkflowrun-controller"),
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

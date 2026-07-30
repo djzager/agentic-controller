@@ -1,0 +1,10 @@
+kind: feature
+description: >
+  Add AgentWorkflow and AgentWorkflowRun controllers for sequential
+  multi-stage agent orchestration. AgentWorkflow validates referenced
+  Agents are Ready. AgentWorkflowRun creates AgentRuns per stage
+  sequentially, forwarding params, models, env, and envFrom from
+  the workflow run to each stage. Includes deterministic AgentRun
+  naming, workflow guide passthrough via KONVEYOR_WORKFLOW_GUIDE,
+  and a fix for the Sandbox finished-reason constant (Succeeded →
+  PodSucceeded) to match Agent Sandbox v0.5.0.

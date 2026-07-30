@@ -7,6 +7,13 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
   - secrets
   verbs:
   - create
@@ -38,10 +45,10 @@ rules:
 - apiGroups:
   - konveyor.io
   resources:
-  - agentplaybookruns
-  - agentplaybooks
   - agentruns
   - agents
+  - agentworkflowruns
+  - agentworkflows
   - llmproviders
   - skillcards
   - skillcollections
@@ -56,10 +63,10 @@ rules:
 - apiGroups:
   - konveyor.io
   resources:
-  - agentplaybookruns/finalizers
-  - agentplaybooks/finalizers
   - agentruns/finalizers
   - agents/finalizers
+  - agentworkflowruns/finalizers
+  - agentworkflows/finalizers
   - llmproviders/finalizers
   - skillcards/finalizers
   - skillcollections/finalizers
@@ -68,10 +75,10 @@ rules:
 - apiGroups:
   - konveyor.io
   resources:
-  - agentplaybookruns/status
-  - agentplaybooks/status
   - agentruns/status
   - agents/status
+  - agentworkflowruns/status
+  - agentworkflows/status
   - llmproviders/status
   - skillcards/status
   - skillcollections/status
