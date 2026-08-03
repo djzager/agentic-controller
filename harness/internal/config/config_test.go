@@ -19,6 +19,10 @@ func clearKonveyorEnv(t *testing.T) {
 		"APP_ID",
 		"KONVEYOR_ACP_SECRET_KEY",
 		"TARGET_BRANCH",
+		"KONVEYOR_PROMPT",
+		"KONVEYOR_PLAYBOOK_INSTRUCTIONS",
+		"KONVEYOR_WORKFLOW_GUIDE",
+		"KONVEYOR_INSTRUCTIONS",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -130,4 +134,57 @@ func TestLoadFromEnv(t *testing.T) {
 			t.Errorf("MaxTurns = %d, want 500", cfg.MaxTurns)
 		}
 	})
+}
+
+func TestLoadFromEnvReadsPromptLayers(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+	t.Setenv("KONVEYOR_PROMPT", "AGENT PROMPT")
+	t.Setenv("KONVEYOR_WORKFLOW_GUIDE", "WORKFLOW GUIDE")
+	t.Setenv("KONVEYOR_INSTRUCTIONS", "STAGE TASK")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if cfg.AgentPrompt != "AGENT PROMPT" {
+		t.Errorf("AgentPrompt = %q", cfg.AgentPrompt)
+	}
+	if cfg.WorkflowGuide != "WORKFLOW GUIDE" {
+		t.Errorf("WorkflowGuide = %q", cfg.WorkflowGuide)
+	}
+	if cfg.StageInstructions != "STAGE TASK" {
+		t.Errorf("StageInstructions = %q", cfg.StageInstructions)
+	}
+}
+
+// #80 renames the env var; the harness reads either so merge order does not
+// matter. Remove with the fallback once #80 has landed everywhere.
+func TestLoadFromEnvFallsBackToPlaybookInstructions(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+	t.Setenv("KONVEYOR_PLAYBOOK_INSTRUCTIONS", "OLD NAME")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if cfg.WorkflowGuide != "OLD NAME" {
+		t.Errorf("WorkflowGuide = %q, want the KONVEYOR_PLAYBOOK_INSTRUCTIONS value", cfg.WorkflowGuide)
+	}
+}
+
+func TestLoadFromEnvPrefersWorkflowGuide(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+	t.Setenv("KONVEYOR_PLAYBOOK_INSTRUCTIONS", "OLD NAME")
+	t.Setenv("KONVEYOR_WORKFLOW_GUIDE", "NEW NAME")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if cfg.WorkflowGuide != "NEW NAME" {
+		t.Errorf("WorkflowGuide = %q, want the KONVEYOR_WORKFLOW_GUIDE value", cfg.WorkflowGuide)
+	}
 }
