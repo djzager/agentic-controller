@@ -36,44 +36,44 @@ import (
 )
 
 const (
-	// playbookAgentRefIndexField is the field index for looking up
-	// AgentPlaybooks by their stages' agentRef values.
-	playbookAgentRefIndexField = ".spec.stages.agentRef"
+	// workflowAgentRefIndexField is the field index for looking up
+	// AgentWorkflows by their stages' agentRef values.
+	workflowAgentRefIndexField = ".spec.stages.agentRef"
 )
 
-// AgentPlaybookReconciler reconciles an AgentPlaybook object.
-type AgentPlaybookReconciler struct {
+// AgentWorkflowReconciler reconciles an AgentWorkflow object.
+type AgentWorkflowReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 }
 
-// +kubebuilder:rbac:groups=konveyor.io,resources=agentplaybooks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=konveyor.io,resources=agentplaybooks/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=konveyor.io,resources=agentplaybooks/finalizers,verbs=update
+// +kubebuilder:rbac:groups=konveyor.io,resources=agentworkflows,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=konveyor.io,resources=agentworkflows/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=konveyor.io,resources=agentworkflows/finalizers,verbs=update
 
-// Reconcile handles AgentPlaybook reconciliation.
+// Reconcile handles AgentWorkflow reconciliation.
 //
 // The controller validates that all Agents referenced by stages exist and
-// are Ready, then reports aggregate readiness on the AgentPlaybook.
-func (r *AgentPlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// are Ready, then reports aggregate readiness on the AgentWorkflow.
+func (r *AgentWorkflowReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	var playbook konveyoriov1alpha1.AgentPlaybook
-	if err := r.Get(ctx, req.NamespacedName, &playbook); err != nil {
+	var workflow konveyoriov1alpha1.AgentWorkflow
+	if err := r.Get(ctx, req.NamespacedName, &workflow); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	logger.V(1).Info("Reconciling AgentPlaybook", "name", playbook.Name)
+	logger.V(1).Info("Reconciling AgentWorkflow", "name", workflow.Name)
 
-	original := playbook.DeepCopy()
-	playbook.Status.ObservedGeneration = playbook.Generation
+	original := workflow.DeepCopy()
+	workflow.Status.ObservedGeneration = workflow.Generation
 
 	var notReadyReasons []string
 
 	// Validate that each stage's Agent exists and is Ready.
-	for _, stage := range playbook.Spec.Stages {
+	for _, stage := range workflow.Spec.Stages {
 		var agent konveyoriov1alpha1.Agent
-		agentKey := types.NamespacedName{Namespace: playbook.Namespace, Name: stage.AgentRef}
+		agentKey := types.NamespacedName{Namespace: workflow.Namespace, Name: stage.AgentRef}
 		if err := r.Get(ctx, agentKey, &agent); err != nil {
 			if errors.IsNotFound(err) {
 				notReadyReasons = append(notReadyReasons,
@@ -91,25 +91,25 @@ func (r *AgentPlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	if len(notReadyReasons) == 0 {
-		meta.SetStatusCondition(&playbook.Status.Conditions, metav1.Condition{
+		meta.SetStatusCondition(&workflow.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionTrue,
-			ObservedGeneration: playbook.Generation,
+			ObservedGeneration: workflow.Generation,
 			Reason:             "AllAgentsReady",
 			Message:            "All stage Agents are ready",
 		})
 	} else {
-		meta.SetStatusCondition(&playbook.Status.Conditions, metav1.Condition{
+		meta.SetStatusCondition(&workflow.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
-			ObservedGeneration: playbook.Generation,
+			ObservedGeneration: workflow.Generation,
 			Reason:             "AgentsNotReady",
 			Message:            strings.Join(notReadyReasons, "; "),
 		})
 	}
 
-	if err := r.Status().Patch(ctx, &playbook, client.MergeFrom(original)); err != nil {
-		logger.Error(err, "Failed to patch AgentPlaybook status")
+	if err := r.Status().Patch(ctx, &workflow, client.MergeFrom(original)); err != nil {
+		logger.Error(err, "Failed to patch AgentWorkflow status")
 		return ctrl.Result{}, err
 	}
 
@@ -117,38 +117,38 @@ func (r *AgentPlaybookReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *AgentPlaybookReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	// Index AgentPlaybooks by their stages' agentRef values for
+func (r *AgentWorkflowReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Index AgentWorkflows by their stages' agentRef values for
 	// efficient reverse lookup when an Agent changes.
 	if err := mgr.GetFieldIndexer().IndexField(
 		context.Background(),
-		&konveyoriov1alpha1.AgentPlaybook{},
-		playbookAgentRefIndexField,
+		&konveyoriov1alpha1.AgentWorkflow{},
+		workflowAgentRefIndexField,
 		func(obj client.Object) []string {
-			playbook := obj.(*konveyoriov1alpha1.AgentPlaybook)
-			refs := make([]string, len(playbook.Spec.Stages))
-			for i, stage := range playbook.Spec.Stages {
+			workflow := obj.(*konveyoriov1alpha1.AgentWorkflow)
+			refs := make([]string, len(workflow.Spec.Stages))
+			for i, stage := range workflow.Spec.Stages {
 				refs[i] = stage.AgentRef
 			}
 			return refs
 		},
 	); err != nil {
-		return fmt.Errorf("indexing %s: %w", playbookAgentRefIndexField, err)
+		return fmt.Errorf("indexing %s: %w", workflowAgentRefIndexField, err)
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&konveyoriov1alpha1.AgentPlaybook{}).
+		For(&konveyoriov1alpha1.AgentWorkflow{}).
 		Watches(
 			&konveyoriov1alpha1.Agent{},
-			handler.EnqueueRequestsFromMapFunc(r.findPlaybooksForAgent),
+			handler.EnqueueRequestsFromMapFunc(r.findWorkflowsForAgent),
 		).
-		Named("agentplaybook").
+		Named("agentworkflow").
 		Complete(r)
 }
 
-// findPlaybooksForAgent returns reconcile requests for all AgentPlaybooks
+// findWorkflowsForAgent returns reconcile requests for all AgentWorkflows
 // that reference the given Agent in any stage.
-func (r *AgentPlaybookReconciler) findPlaybooksForAgent(
+func (r *AgentWorkflowReconciler) findWorkflowsForAgent(
 	ctx context.Context,
 	obj client.Object,
 ) []reconcile.Request {
@@ -157,18 +157,18 @@ func (r *AgentPlaybookReconciler) findPlaybooksForAgent(
 		return nil
 	}
 
-	var playbookList konveyoriov1alpha1.AgentPlaybookList
-	if err := r.List(ctx, &playbookList,
+	var workflowList konveyoriov1alpha1.AgentWorkflowList
+	if err := r.List(ctx, &workflowList,
 		client.InNamespace(agent.Namespace),
-		client.MatchingFields{playbookAgentRefIndexField: agent.Name},
+		client.MatchingFields{workflowAgentRefIndexField: agent.Name},
 	); err != nil {
-		log.FromContext(ctx).Error(err, "Failed to list AgentPlaybooks for Agent",
+		log.FromContext(ctx).Error(err, "Failed to list AgentWorkflows for Agent",
 			"agent", agent.Name)
 		return nil
 	}
 
-	requests := make([]reconcile.Request, len(playbookList.Items))
-	for i, pb := range playbookList.Items {
+	requests := make([]reconcile.Request, len(workflowList.Items))
+	for i, pb := range workflowList.Items {
 		requests[i] = reconcile.Request{
 			NamespacedName: types.NamespacedName{
 				Namespace: pb.Namespace,

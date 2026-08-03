@@ -48,14 +48,14 @@ Kubernetes API with the emerging OCI skills ecosystem.
 | **SkillCollection** | Group of skills. Each entry references a skill by OCI image ref, git source, or SkillCard CR name. |
 | **LLMProvider** | LLM service endpoint, credentials (Secret ref), and available models with context window sizes and optional tier labels. |
 | **Agent** | Template declaring what is available for execution. References one or more LLMProviders, SkillCards, SkillCollections, a container image, a prompt, and declares typed parameters (inputs the AgentRun must supply). Does not select a specific model — model selection happens at execution time. Analogous to a Tekton Task. |
-| **AgentPlaybook** | Ordered sequence of stages. Each stage references an Agent and carries instructions. Stages execute sequentially with fresh agent sessions. Cross-stage continuity is through git branch content. |
+| **AgentWorkflow** | Ordered sequence of stages. Each stage references an Agent and carries instructions. Stages execute sequentially with fresh agent sessions. Cross-stage continuity is through git branch content. |
 
 **Execution resources** (created to trigger work):
 
 | CRD | Purpose |
 |-----|---------|
 | **AgentRun** | Execute a single Agent with specific values. References an Agent, selects models, supplies parameter values, carries instructions, and may include additional `env` and `envFrom` entries passed through to the Sandbox. The controller validates params against the Agent's declarations, creates a Sandbox, and tracks status. Analogous to a Tekton TaskRun. |
-| **AgentPlaybookRun** | Execute an AgentPlaybook. Creates AgentRun CRs sequentially per stage, all sharing the same target branch. Each stage reads the previous stage's committed handoff files. |
+| **AgentWorkflowRun** | Execute an AgentWorkflow. Creates AgentRun CRs sequentially per stage, all sharing the same target branch. Each stage reads the previous stage's committed handoff files. |
 
 ### Naming alignment with skillimage
 
@@ -211,7 +211,7 @@ isolation requires OpenShell (NVIDIA) filesystem policy enforcement,
 which can deny reads to the Secret mount path at the kernel level.
 The harness manages all credentialed git operations.
 
-No PVCs survive between runs. Cross-stage continuity in playbooks
+No PVCs survive between runs. Cross-stage continuity in workflows
 is through committed files on the shared branch. Parallel agents
 on the same application use different branches.
 
@@ -228,10 +228,10 @@ repo on a `konveyor/<run-name>` branch. This follows the pattern
 established by the assets-generation enhancement and implemented
 in tackle2-addon-platform.
 
-### AgentPlaybook execution model
+### AgentWorkflow execution model
 
-An AgentPlaybook is a flat sequence of stages. Each stage references
-an Agent and carries instructions. The AgentPlaybookRun controller
+An AgentWorkflow is a flat sequence of stages. Each stage references
+an Agent and carries instructions. The AgentWorkflowRun controller
 creates AgentRuns sequentially, all targeting the same branch.
 
 Each stage gets a fresh agent session. Cross-stage knowledge
@@ -240,7 +240,7 @@ transfer happens through committed files on the branch:
 1. **Handoff files** — each stage commits `.konveyor/handoff.md`
    summarizing what was accomplished and what remains. The next
    stage's agent reads this on checkout.
-2. **Playbook guide** — the playbook's guide is committed as
+2. **Workflow guide** — the workflow's guide is committed as
    `.konveyor/guide.md` before stage 1, providing ambient context.
 
 Prompt composition at execution time:
@@ -269,7 +269,7 @@ executions of that Agent, enabling organizational learning.
 
 A POC exists in dymurray/tackle2-addon-kai using mempalace. Memory
 service integration is deferred to Phase 4 — after the core execution
-model (AgentRun), playbooks (AgentPlaybook), and configurable git
+model (AgentRun), workflows (AgentWorkflow), and configurable git
 strategy are proven.
 
 ### Hub as a data service
@@ -450,16 +450,16 @@ otherwise need to build ourselves.
 ### Tekton as the orchestration layer
 
 Tekton Tasks/Pipelines were considered for orchestrating multi-stage
-agent playbooks. Deferred, not rejected: the MVP requires only
+agent workflows. Deferred, not rejected: the MVP requires only
 sequential stage execution, and a custom controller is simpler than
 adding a Tekton dependency. The architecture does not preclude Tekton
-integration later — AgentPlaybookRun could generate Tekton
+integration later — AgentWorkflowRun could generate Tekton
 PipelineRuns as an implementation detail when users need conditionals,
 parallelism, retries, or supply chain signing.
 
 ### Stages with phases and session continuity
 
-We originally designed AgentPlaybook with stages containing multiple
+We originally designed AgentWorkflow with stages containing multiple
 phases, where phases within a stage shared session state via a PVC
 (SQLite database). This provided full conversation continuity within
 a stage.

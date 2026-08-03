@@ -368,7 +368,13 @@ func (r *AgentRunReconciler) createSandbox(
 					},
 				},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyOnFailure,
+					// Never restart — a failed container must reach a terminal
+					// phase so the AgentRun (and workflow stage) can observe
+					// the failure. OnFailure would cause infinite crashloops
+					// (#51). The tradeoff is that transient failures (image
+					// pull blips, node eviction) are not retried. Bounded
+					// retry (backoffLimit-style) can be added later if needed.
+					RestartPolicy: corev1.RestartPolicyNever,
 					Containers: []corev1.Container{
 						{
 							Name:  "agent",

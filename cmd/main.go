@@ -215,18 +215,19 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
-	if err := (&controller.AgentPlaybookReconciler{
+	if err := (&controller.AgentWorkflowReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "AgentPlaybook")
+		setupLog.Error(err, "Failed to create controller", "controller", "AgentWorkflow")
 		os.Exit(1)
 	}
-	if err := (&controller.AgentPlaybookRunReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+	if err := (&controller.AgentWorkflowRunReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		Recorder: mgr.GetEventRecorder("agentworkflowrun-controller"),
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "Failed to create controller", "controller", "AgentPlaybookRun")
+		setupLog.Error(err, "Failed to create controller", "controller", "AgentWorkflowRun")
 		os.Exit(1)
 	}
 	// +kubebuilder:scaffold:builder

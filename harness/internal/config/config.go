@@ -71,9 +71,9 @@ func LoadFromEnv() (*Config, error) {
 
 // workflowGuideFromEnv reads the workflow guide the controller injects.
 //
-// konveyor/agentic-controller#80 renames KONVEYOR_PLAYBOOK_INSTRUCTIONS to
-// KONVEYOR_WORKFLOW_GUIDE. Reading both means the harness works either side of
-// that merge; drop the fallback once #80 has landed everywhere.
+// The canonical env var is KONVEYOR_WORKFLOW_GUIDE (set by the controller).
+// KONVEYOR_PLAYBOOK_INSTRUCTIONS is the legacy name; drop the fallback
+// once all deployed controllers use the new name.
 func workflowGuideFromEnv() string {
 	if v := os.Getenv("KONVEYOR_WORKFLOW_GUIDE"); v != "" {
 		return v

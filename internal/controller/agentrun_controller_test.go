@@ -352,6 +352,9 @@ var _ = Describe("AgentRun Controller", func() {
 			Expect(sandbox.Spec.PodTemplate.ObjectMeta.Labels).To(HaveKeyWithValue("konveyor.io/agentrun", name))
 			Expect(sandbox.Spec.PodTemplate.ObjectMeta.Labels).To(HaveKeyWithValue("konveyor.io/agent", agentName))
 
+			By("verifying restartPolicy is Never so failed stages are observable (#51)")
+			Expect(sandbox.Spec.PodTemplate.Spec.RestartPolicy).To(Equal(corev1.RestartPolicyNever))
+
 			By("verifying the single-key provider credential is injected as API_KEY")
 			container := sandbox.Spec.PodTemplate.Spec.Containers[0]
 			var apiKey *corev1.EnvVar

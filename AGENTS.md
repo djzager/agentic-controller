@@ -5,8 +5,8 @@ All agent-facing guidance for this repository. Read this file first.
 ## What this project is
 
 A Kubernetes controller for managing AI agent workloads. Defines CRDs
-(Agent, AgentRun, AgentPlaybook, SkillCard, SkillCollection,
-LLMProvider) and controllers for composing and executing agent
+(Agent, AgentRun, AgentWorkflow, AgentWorkflowRun, SkillCard,
+SkillCollection, LLMProvider) and controllers for composing and executing agent
 workloads via Agent Sandbox.
 
 ## Key documents

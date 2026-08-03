@@ -8,7 +8,7 @@
 
 The agentic platform controller introduces seven CRDs under the
 `konveyor.io` API group (SkillCard, SkillCollection, LLMProvider,
-Agent, AgentRun, AgentPlaybook, AgentPlaybookRun). The UI needs to
+Agent, AgentRun, AgentWorkflow, AgentWorkflowRun). The UI needs to
 create, read, update, and delete these resources. The question is
 how the UI accesses them.
 
