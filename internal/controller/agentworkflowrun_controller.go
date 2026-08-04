@@ -399,7 +399,7 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 		Spec: konveyoriov1alpha1.AgentRunSpec{
 			AgentRef:     stage.AgentRef,
 			Instructions: stage.Instructions,
-			Models:       pbRun.Spec.Models,
+			Gateway:      pbRun.Spec.Gateway,
 			Params:       stageParams,
 			Env:          env,
 			EnvFrom:      pbRun.Spec.EnvFrom,

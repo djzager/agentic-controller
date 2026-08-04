@@ -9,6 +9,12 @@ import (
 func clearKonveyorEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
+		// New canonical names.
+		"KONVEYOR_LLM_MODEL",
+		"KONVEYOR_LLM_PROVIDER",
+		"KONVEYOR_LLM_ENDPOINT",
+		"KONVEYOR_LLM_API_KEY",
+		// Legacy names (fallback).
 		"KONVEYOR_MODEL_PRIMARY_MODEL",
 		"KONVEYOR_MODEL_PRIMARY_PROVIDER",
 		"KONVEYOR_MODEL_PRIMARY_ENDPOINT",
@@ -34,8 +40,7 @@ func clearKonveyorEnv(t *testing.T) {
 
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("KONVEYOR_MODEL_PRIMARY_MODEL", "claude-sonnet-4-5")
-	t.Setenv("KONVEYOR_MODEL_PRIMARY_PROVIDER", "anthropic")
+	t.Setenv("KONVEYOR_LLM_MODEL", "claude-sonnet-4-5")
 	t.Setenv("HUB_BASE_URL", "https://hub.example.com")
 	t.Setenv("APP_ID", "42")
 	t.Setenv("KONVEYOR_ACP_SECRET_KEY", "test-secret-key")
@@ -46,8 +51,9 @@ func TestLoadFromEnv(t *testing.T) {
 	t.Run("returns config from env", func(t *testing.T) {
 		clearKonveyorEnv(t)
 		setRequiredEnv(t)
-		t.Setenv("KONVEYOR_MODEL_PRIMARY_ENDPOINT", "https://api.anthropic.com")
-		t.Setenv("KONVEYOR_MODEL_PRIMARY_API_KEY", "sk-test-key")
+		t.Setenv("KONVEYOR_LLM_PROVIDER", "anthropic")
+		t.Setenv("KONVEYOR_LLM_ENDPOINT", "https://api.anthropic.com")
+		t.Setenv("KONVEYOR_LLM_API_KEY", "sk-test-key")
 
 		cfg, err := LoadFromEnv()
 		if err != nil {
@@ -137,6 +143,73 @@ func TestLoadFromEnv(t *testing.T) {
 			t.Errorf("MaxTurns = %d, want 500", cfg.MaxTurns)
 		}
 	})
+}
+
+// The legacy KONVEYOR_MODEL_PRIMARY_* env vars are still read as
+// fallbacks. Remove this test when the fallback is dropped.
+func TestLoadFromEnvFallsBackToLegacyModelVars(t *testing.T) {
+	clearKonveyorEnv(t)
+
+	// Set only legacy names — new names are unset.
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_MODEL", "gpt-4o")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_PROVIDER", "openai")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_ENDPOINT", "https://api.openai.com")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_API_KEY", "sk-legacy")
+	t.Setenv("HUB_BASE_URL", "https://hub.example.com")
+	t.Setenv("APP_ID", "42")
+	t.Setenv("KONVEYOR_ACP_SECRET_KEY", "test-secret-key")
+	t.Setenv("TARGET_BRANCH", "migration-1234")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q (legacy fallback)", cfg.Model, "gpt-4o")
+	}
+	if cfg.Provider != "openai" {
+		t.Errorf("Provider = %q, want %q (legacy fallback)", cfg.Provider, "openai")
+	}
+	if cfg.Endpoint != "https://api.openai.com" {
+		t.Errorf("Endpoint = %q, want %q (legacy fallback)", cfg.Endpoint, "https://api.openai.com")
+	}
+	if cfg.APIKey != "sk-legacy" {
+		t.Errorf("APIKey = %q, want %q (legacy fallback)", cfg.APIKey, "sk-legacy")
+	}
+}
+
+// When both new and legacy env vars are set, the new names take precedence.
+func TestLoadFromEnvNewVarsTakePrecedence(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+
+	// Set legacy values.
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_MODEL", "old-model")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_PROVIDER", "old-provider")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_ENDPOINT", "https://old.endpoint")
+	t.Setenv("KONVEYOR_MODEL_PRIMARY_API_KEY", "sk-old")
+
+	// Set new values (KONVEYOR_LLM_MODEL already set by setRequiredEnv).
+	t.Setenv("KONVEYOR_LLM_PROVIDER", "anthropic")
+	t.Setenv("KONVEYOR_LLM_ENDPOINT", "https://new.endpoint")
+	t.Setenv("KONVEYOR_LLM_API_KEY", "sk-new")
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Model != "claude-sonnet-4-5" {
+		t.Errorf("Model = %q, want new value", cfg.Model)
+	}
+	if cfg.Provider != "anthropic" {
+		t.Errorf("Provider = %q, want new value", cfg.Provider)
+	}
+	if cfg.Endpoint != "https://new.endpoint" {
+		t.Errorf("Endpoint = %q, want new value", cfg.Endpoint)
+	}
+	if cfg.APIKey != "sk-new" {
+		t.Errorf("APIKey = %q, want new value", cfg.APIKey)
+	}
 }
 
 func TestLoadFromEnvReadsPromptLayers(t *testing.T) {

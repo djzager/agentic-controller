@@ -93,20 +93,20 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			workflowName = "apr-ctrl-seq-workflow"
 			pbRunName    = "apr-ctrl-seq-run"
 			agentName    = "apr-ctrl-seq-agent"
-			provName     = "apr-prov-seq"
+			gwName       = "apr-prov-seq"
 			secretName   = "apr-secret-seq"
 		)
 
 		It("should create AgentRuns per stage and advance on completion", func() {
-			cleanup := makeReadyProvider(provName, secretName)
+			cleanup := makeReadyGateway(gwName, secretName)
 			defer cleanup()
 
 			By("creating a Ready Agent")
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image:     testAgentImage,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{{Ref: provName}},
+					Image:    testAgentImage,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{{Ref: gwName}},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{Name: testParamName, Required: true},
 					},
@@ -134,9 +134,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: pbRunName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentWorkflowRunSpec{
 					WorkflowRef: workflowName,
-					Models: []konveyoriov1alpha1.AgentRunModelSelection{
-						{Role: testRolePrimary, Provider: provName, Model: testLLMModelName},
-					},
+					Gateway:     gwName,
 					Params: []konveyoriov1alpha1.AgentRunParam{
 						{Name: testParamName, Value: testRepoURL},
 					},
@@ -167,8 +165,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			Expect(stageARun.Spec.Params).To(HaveLen(1))
 			Expect(stageARun.Spec.Params[0].Name).To(Equal(testParamName))
 			Expect(stageARun.Spec.Params[0].Value).To(Equal(testRepoURL))
-			Expect(stageARun.Spec.Models).To(HaveLen(1))
-			Expect(stageARun.Spec.Models[0].Role).To(Equal(testRolePrimary))
+			Expect(stageARun.Spec.Gateway).To(Equal(gwName))
 
 			By("verifying stage-a AgentRun has correct labels")
 			Expect(stageARun.Labels).To(HaveKeyWithValue(labelAgentWorkflowRun, pbRunName))
@@ -253,20 +250,20 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			pbRunName    = "apr-ctrl-filter-run"
 			agentAName   = "apr-ctrl-filter-agent-a"
 			agentBName   = "apr-ctrl-filter-agent-b"
-			provName     = "apr-prov-filter"
+			gwName       = "apr-prov-filter"
 			secretName   = "apr-secret-filter"
 		)
 
 		It("should forward only params each stage Agent declares", func() {
-			cleanup := makeReadyProvider(provName, secretName)
+			cleanup := makeReadyGateway(gwName, secretName)
 			defer cleanup()
 
 			By("creating Agent A that declares 'source_url' only")
 			agentA := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: agentAName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image:     testAgentImage,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{{Ref: provName}},
+					Image:    testAgentImage,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{{Ref: gwName}},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{Name: "source_url", Required: true},
 					},
@@ -279,8 +276,8 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			agentB := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: agentBName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image:     testAgentImage,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{{Ref: provName}},
+					Image:    testAgentImage,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{{Ref: gwName}},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{Name: testParamTargetBranch, Required: true},
 					},
@@ -307,9 +304,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: pbRunName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentWorkflowRunSpec{
 					WorkflowRef: workflowName,
-					Models: []konveyoriov1alpha1.AgentRunModelSelection{
-						{Role: testRolePrimary, Provider: provName, Model: testLLMModelName},
-					},
+					Gateway:     gwName,
 					Params: []konveyoriov1alpha1.AgentRunParam{
 						{Name: "source_url", Value: "https://github.com/example/repo.git"},
 						{Name: testParamTargetBranch, Value: "konveyor/test"},
@@ -384,19 +379,19 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			workflowName = "apr-ctrl-fail-workflow"
 			pbRunName    = "apr-ctrl-fail-run"
 			agentName    = "apr-ctrl-fail-agent"
-			provName     = "apr-prov-fail"
+			gwName       = "apr-prov-fail"
 			secretName   = "apr-secret-fail"
 		)
 
 		It("should fail the entire workflow run", func() {
-			cleanup := makeReadyProvider(provName, secretName)
+			cleanup := makeReadyGateway(gwName, secretName)
 			defer cleanup()
 
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image:     testAgentImage,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{{Ref: provName}},
+					Image:    testAgentImage,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{{Ref: gwName}},
 				},
 			}
 			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
@@ -418,9 +413,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				ObjectMeta: metav1.ObjectMeta{Name: pbRunName, Namespace: testNamespace},
 				Spec: konveyoriov1alpha1.AgentWorkflowRunSpec{
 					WorkflowRef: workflowName,
-					Models: []konveyoriov1alpha1.AgentRunModelSelection{
-						{Role: testRolePrimary, Provider: provName, Model: testLLMModelName},
-					},
+					Gateway:     gwName,
 				},
 			}
 			Expect(k8sClient.Create(ctx, pbRun)).To(Succeed())

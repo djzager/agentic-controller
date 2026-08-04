@@ -25,20 +25,30 @@ Examples: "konveyor-quarkus-skills" (a collection of 15 migration
 skills from a git repo), "enterprise-rules" (a curated set of rules
 as OCI images).
 
-**LLMProvider** — *Deprecated, to be removed.* Replaced by OpenShell
-gateway inference routing. See ADR-0004.
+**Gateway** — An LLM service endpoint serving exactly one provider/model
+combination. Each Gateway declares a provider type (e.g. `anthropic`,
+`openai`, `gcp-vertex-ai`), an endpoint, credentials, and a single model
+with context window size and optional tier label. The provider type is
+injected as `KONVEYOR_LLM_PROVIDER` so the harness can map credentials
+to provider-specific env vars (e.g. `ANTHROPIC_API_KEY`). This is a
+pre-OpenShell shim — when OpenShell is integrated, `inference.local`
+eliminates provider-specific credential mapping and the field is removed.
+The controller verifies connectivity on create/update. When OpenShell
+lands, the Gateway CRD is replaced by OpenShell Gateway Services — the
+field names and interaction model are designed to make this swap seamless.
 
 **Agent** — A capability definition declaring what is available for
 execution. References zero or more SkillCards and SkillCollections,
-one or more OpenShell gateways (each representing a provider/model
-combination available for runs), a container image (carrying the
-agent runtime and language toolchains), a prompt (standing
-instructions for how the agent operates), and optionally a memory
-service for accumulating domain knowledge across executions. An Agent
-does not select a specific model — it declares what is available.
-Gateway selection happens at execution time in the AgentRun. The
-Agent controller validates that referenced gateways exist as Services
-in the namespace and that SkillCards/SkillCollections are ready.
+one or more Gateways (each representing a provider/model combination
+available for runs), a container image (carrying the agent runtime
+and language toolchains), a prompt (standing instructions for how the
+agent operates), and optionally a memory service for accumulating
+domain knowledge across executions. An Agent does not select a
+specific model — it declares what is available. Gateway selection
+happens at execution time in the AgentRun. The Agent controller
+validates that referenced Gateway CRs exist in the namespace and that
+SkillCards/SkillCollections are ready. When OpenShell is integrated,
+Gateway CRs will be replaced by OpenShell Gateway Services.
 Subagent delegation is a runtime concern — the agent runtime may
 spawn subagents internally but this is not modeled in the CRD.
 _Avoid_: conflating Agent with AgentRun — Agent is a template,
@@ -56,13 +66,14 @@ creating one does not execute anything. A future enhancement may
 introduce phases within stages for session continuity via shared PVCs.
 
 **AgentRun** — A request to execute a single Agent with specific
-selections. References an Agent, selects which OpenShell gateway to
-use for this run (from the Agent's available set), carries
-instructions and generic parameters (key-value pairs injected as
-environment variables into the sandbox). The controller validates
-that the selected gateway is in the Agent's gateway list and that the
-gateway Service exists, creates a sandbox through the OpenShell
-gateway API, and tracks status to completion. Parameters are
+selections. References an Agent, selects which Gateway to use for
+this run (from the Agent's available set), carries instructions and
+generic parameters (key-value pairs injected as environment variables
+into the sandbox). The controller validates that the selected Gateway
+is in the Agent's gateway list and that the Gateway CR exists, creates
+a sandbox, and tracks status to completion. When OpenShell is
+integrated, Gateway CRs will be replaced by OpenShell Gateway Services
+and sandboxes will be created through the OpenShell gateway API. Parameters are
 domain-agnostic — the controller passes them through without
 interpretation. For Konveyor-managed agents, Hub injects connectivity
 info (`HUB_BASE_URL`, `APP_ID`, scoped API token) into the
@@ -191,10 +202,10 @@ service instance.
   **SkillCard** CRs.
 - An **Agent** references zero or more **SkillCards** and zero or more
   **SkillCollections**.
-- An **Agent** references one or more **OpenShell Gateways** —
-  declaring the set of provider/model combinations available for runs.
-- An **AgentRun** references one **Agent** and selects one **OpenShell
-  Gateway** from the Agent's available set.
+- An **Agent** references one or more **Gateways** — declaring the
+  set of provider/model combinations available for runs.
+- An **AgentRun** references one **Agent** and selects one **Gateway**
+  from the Agent's available set.
 - An **AgentWorkflow** organizes work into stages. Each stage
   references an **Agent** and carries instructions.
 - An **AgentWorkflowRun** references one **AgentWorkflow** (or inlines it)

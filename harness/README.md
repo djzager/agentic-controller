@@ -52,8 +52,7 @@ All configuration is via environment variables — there is no config file or `i
 
 | Variable | Description |
 |----------|-------------|
-| `KONVEYOR_MODEL_PRIMARY_MODEL` | LLM model name |
-| `KONVEYOR_MODEL_PRIMARY_PROVIDER` | LLM provider (e.g. `anthropic`, `openai`) |
+| `KONVEYOR_LLM_MODEL` | LLM model name (fallback: `KONVEYOR_MODEL_PRIMARY_MODEL`) |
 | `HUB_BASE_URL` | Konveyor Hub API base URL |
 | `APP_ID` | Application ID in Hub |
 | `KONVEYOR_ACP_SECRET_KEY` | Secret key for ACP WebSocket auth |
@@ -63,8 +62,9 @@ All configuration is via environment variables — there is no config file or `i
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `KONVEYOR_MODEL_PRIMARY_ENDPOINT` | — | Custom LLM endpoint URL |
-| `KONVEYOR_MODEL_PRIMARY_API_KEY` | — | LLM API key |
+| `KONVEYOR_LLM_PROVIDER` | — | LLM provider, e.g. `anthropic`, `openai` (fallback: `KONVEYOR_MODEL_PRIMARY_PROVIDER`) |
+| `KONVEYOR_LLM_ENDPOINT` | — | Custom LLM endpoint URL (fallback: `KONVEYOR_MODEL_PRIMARY_ENDPOINT`) |
+| `KONVEYOR_LLM_API_KEY` | — | LLM API key (fallback: `KONVEYOR_MODEL_PRIMARY_API_KEY`) |
 | `HUB_TOKEN` | — | Hub authentication token |
 | `KONVEYOR_PARAM_MAX_TURNS` | `200` | Max tool-call turns before terminating |
 | `HARNESS_WORK_DIR` | `/workspace/repo` | Clone directory |
