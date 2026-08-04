@@ -246,7 +246,23 @@ func (c *SessionClient) SendPrompt(ctx context.Context, sessionID string, conten
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-c.ws.Done():
-			return nil, fmt.Errorf("websocket connection closed during prompt")
+			// readLoop exited. The response may already be routed to
+			// respCh — drain it before giving up.
+			select {
+			case msg := <-respCh:
+				for _, n := range drainNotifications(notifCh) {
+					handlePromptNotification(n, result)
+				}
+				if msg.Error != nil {
+					return nil, fmt.Errorf("prompt error %d: %s", msg.Error.Code, msg.Error.Message)
+				}
+				if err := json.Unmarshal(msg.Result, result); err != nil {
+					return nil, fmt.Errorf("parse prompt result: %w", err)
+				}
+				return result, nil
+			default:
+				return nil, fmt.Errorf("websocket connection closed during prompt")
+			}
 		case msg := <-notifCh:
 			if isToolCall(msg) {
 				turnCount++
