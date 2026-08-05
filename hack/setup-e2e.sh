@@ -40,7 +40,7 @@ make docker-build IMG="${IMG}" CONTAINER_TOOL="${CONTAINER_TOOL}"
 
 echo "Building controller-agent image: ${CONTROLLER_AGENT_IMG}"
 make controller-agent-build CONTROLLER_AGENT_IMG="${CONTROLLER_AGENT_IMG}" CONTAINER_TOOL="${CONTAINER_TOOL}"
-# Also tag as :latest for the LLMProvider verification Job default.
+# Also tag as :latest for the Gateway verification Job default.
 ${CONTAINER_TOOL} tag "${CONTROLLER_AGENT_IMG}" "quay.io/konveyor/agentic-controller-agent:latest"
 
 echo ""

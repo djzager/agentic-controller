@@ -33,7 +33,7 @@ const (
 	testImageGoose        = "quay.io/konveyor/agent-java-goose:latest"
 	testParamName         = "source_url"
 	testParamTargetBranch = "target_branch"
-	testProvider          = "anthropic-provider"
+	testGateway           = "anthropic-gateway"
 	testModel             = "claude-sonnet-4-20250514"
 )
 
@@ -163,31 +163,30 @@ var _ = Describe("CRD Validation", func() {
 		})
 	})
 
-	// ── LLMProvider ────────────────────────────────────────────────────
-	Context("LLMProvider", func() {
-		It("should accept a valid LLMProvider", func() {
-			llm := &konveyoriov1alpha1.LLMProvider{
+	// ── Gateway ───────────────────────────────────────────────────────
+	Context("Gateway", func() {
+		It("should accept a valid Gateway", func() {
+			gw := &konveyoriov1alpha1.Gateway{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "llm-valid-test",
+					Name:      "gw-valid-test",
 					Namespace: testNamespace,
 				},
-				Spec: konveyoriov1alpha1.LLMProviderSpec{
+				Spec: konveyoriov1alpha1.GatewaySpec{
+					Provider: "anthropic",
 					Endpoint: "https://api.anthropic.com",
-					CredentialRef: konveyoriov1alpha1.LLMProviderCredentialRef{
+					CredentialRef: konveyoriov1alpha1.GatewayCredentialRef{
 						SecretName: "anthropic-credentials",
 						Key:        "api-key",
 					},
-					Models: []konveyoriov1alpha1.LLMProviderModel{
-						{
-							Name:          testModel,
-							ContextWindow: 200000,
-							Tier:          "premium",
-						},
+					Model: konveyoriov1alpha1.GatewayModel{
+						Name:          testModel,
+						ContextWindow: 200000,
+						Tier:          "premium",
 					},
 				},
 			}
-			Expect(k8sClient.Create(ctx, llm)).To(Succeed())
-			Expect(k8sClient.Delete(ctx, llm)).To(Succeed())
+			Expect(k8sClient.Create(ctx, gw)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, gw)).To(Succeed())
 		})
 	})
 
@@ -202,8 +201,8 @@ var _ = Describe("CRD Validation", func() {
 				Spec: konveyoriov1alpha1.AgentSpec{
 					Image:  testImageGoose,
 					Prompt: "You are a Java migration specialist.",
-					Providers: []konveyoriov1alpha1.AgentProviderRef{
-						{Ref: testProvider},
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
+						{Ref: testGateway},
 					},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{
@@ -232,8 +231,8 @@ var _ = Describe("CRD Validation", func() {
 				},
 				Spec: konveyoriov1alpha1.AgentSpec{
 					Image: testImageGoose,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{
-						{Ref: testProviderName},
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
+						{Ref: testGatewayName},
 					},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{
@@ -256,8 +255,8 @@ var _ = Describe("CRD Validation", func() {
 				},
 				Spec: konveyoriov1alpha1.AgentSpec{
 					Image: testImageGoose,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{
-						{Ref: testProviderName},
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
+						{Ref: testGatewayName},
 					},
 					Params: []konveyoriov1alpha1.AgentParam{
 						{
@@ -273,15 +272,15 @@ var _ = Describe("CRD Validation", func() {
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
 
-		It("should reject an Agent with no providers", func() {
+		It("should reject an Agent with no gateways", func() {
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "agent-no-providers-test",
+					Name:      "agent-no-gateways-test",
 					Namespace: testNamespace,
 				},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image:     testImageGoose,
-					Providers: []konveyoriov1alpha1.AgentProviderRef{},
+					Image:    testImageGoose,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{},
 				},
 			}
 			err := k8sClient.Create(ctx, agent)
@@ -300,13 +299,7 @@ var _ = Describe("CRD Validation", func() {
 				},
 				Spec: konveyoriov1alpha1.AgentRunSpec{
 					AgentRef: "java-migration-agent",
-					Models: []konveyoriov1alpha1.AgentRunModelSelection{
-						{
-							Role:     testRolePrimary,
-							Provider: testProvider,
-							Model:    testModel,
-						},
-					},
+					Gateway:  testGateway,
 					Params: []konveyoriov1alpha1.AgentRunParam{
 						{Name: testParamName, Value: "https://github.com/acme/app.git"},
 					},
@@ -414,46 +407,50 @@ var _ = Describe("CRD Validation", func() {
 		})
 	})
 
-	// ── LLMProvider negative tests ─────────────────────────────────────
-	Context("LLMProvider negative", func() {
-		It("should reject an LLMProvider with empty endpoint", func() {
-			llm := &konveyoriov1alpha1.LLMProvider{
+	// ── Gateway negative tests ─────────────────────────────────────────
+	Context("Gateway negative", func() {
+		It("should reject a Gateway with empty endpoint", func() {
+			gw := &konveyoriov1alpha1.Gateway{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "llm-empty-endpoint-test",
+					Name:      "gw-empty-endpoint-test",
 					Namespace: testNamespace,
 				},
-				Spec: konveyoriov1alpha1.LLMProviderSpec{
+				Spec: konveyoriov1alpha1.GatewaySpec{
+					Provider: testProviderType,
 					Endpoint: "",
-					CredentialRef: konveyoriov1alpha1.LLMProviderCredentialRef{
+					CredentialRef: konveyoriov1alpha1.GatewayCredentialRef{
 						SecretName: "creds",
 						Key:        "key",
 					},
-					Models: []konveyoriov1alpha1.LLMProviderModel{
-						{Name: "model", ContextWindow: 100000},
+					Model: konveyoriov1alpha1.GatewayModel{
+						Name: "model", ContextWindow: 100000,
 					},
 				},
 			}
-			err := k8sClient.Create(ctx, llm)
+			err := k8sClient.Create(ctx, gw)
 			Expect(err).To(HaveOccurred())
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
 
-		It("should reject an LLMProvider with empty models", func() {
-			llm := &konveyoriov1alpha1.LLMProvider{
+		It("should reject a Gateway with empty model name", func() {
+			gw := &konveyoriov1alpha1.Gateway{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "llm-empty-models-test",
+					Name:      "gw-empty-model-test",
 					Namespace: testNamespace,
 				},
-				Spec: konveyoriov1alpha1.LLMProviderSpec{
+				Spec: konveyoriov1alpha1.GatewaySpec{
+					Provider: testProviderType,
 					Endpoint: "https://api.example.com",
-					CredentialRef: konveyoriov1alpha1.LLMProviderCredentialRef{
+					CredentialRef: konveyoriov1alpha1.GatewayCredentialRef{
 						SecretName: "creds",
 						Key:        "key",
 					},
-					Models: []konveyoriov1alpha1.LLMProviderModel{},
+					Model: konveyoriov1alpha1.GatewayModel{
+						Name: "", ContextWindow: 100000,
+					},
 				},
 			}
-			err := k8sClient.Create(ctx, llm)
+			err := k8sClient.Create(ctx, gw)
 			Expect(err).To(HaveOccurred())
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
@@ -469,9 +466,7 @@ var _ = Describe("CRD Validation", func() {
 				},
 				Spec: konveyoriov1alpha1.AgentWorkflowRunSpec{
 					WorkflowRef: "java-migration",
-					Models: []konveyoriov1alpha1.AgentRunModelSelection{
-						{Role: testRolePrimary, Provider: "anthropic", Model: testModel},
-					},
+					Gateway:     testGateway,
 					Params: []konveyoriov1alpha1.AgentRunParam{
 						{Name: testParamName, Value: "https://github.com/acme/app.git"},
 					},

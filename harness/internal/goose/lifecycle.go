@@ -190,8 +190,9 @@ func FindFreePort() (int, error) {
 // providerEnv returns the current process environment with LLM provider
 // credentials translated to the env vars goose expects. Called before
 // starting goose serve so the process has the right credentials at
-// startup. In a Sandbox, the controller injects KONVEYOR_MODEL_PRIMARY_*
-// env vars; this function maps them to provider-specific names.
+// startup. In a Sandbox, the controller injects KONVEYOR_LLM_* env vars
+// (with KONVEYOR_MODEL_PRIMARY_* as legacy fallbacks); this function
+// maps them to provider-specific names.
 func providerEnv(provider, model, apiKey, endpoint string) (env []string, tempDirs []string) {
 	env = os.Environ()
 	p := strings.ReplaceAll(strings.ToLower(provider), "-", "_")
