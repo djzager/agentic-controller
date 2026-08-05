@@ -24,24 +24,53 @@ type ServeProcess struct {
 }
 
 const (
-	// DefaultACPPort is the standard port for goose serve in the Agentic
-	// Platform. The controller and UI connect to this port for observability
-	// and human-in-the-loop interaction.
+	// DefaultACPPort is the standard port for the pod's ACP endpoint in
+	// the Agentic Platform. The controller and UI connect to this port
+	// for observability and human-in-the-loop interaction. With the ACP
+	// tee enabled (the default) the harness owns this port and goose
+	// serves on LoopbackACPPort behind it.
 	DefaultACPPort = 4000
+
+	// LoopbackACPPort is where goose serve binds when the harness tee
+	// fronts it on DefaultACPPort. Loopback-only by construction: the
+	// pod's external ACP surface is the tee.
+	LoopbackACPPort = 4001
 )
 
-// StartServe launches goose serve on the given port with authentication.
-// If port is 0, DefaultACPPort (4000) is used. secretKey is the ACP
-// authentication key (from config.Config.ACPSecretKey). Provider, apiKey,
-// and endpoint are translated to provider-specific env vars so goose
-// serve knows how to authenticate with the LLM.
+// StartServe launches goose serve per cfg. Takes a struct rather than a
+// positional list: the parameters are a clump of same-typed strings, and
+// a miscount is silent at compile time.
 //
-// Bind address follows authentication: with a secret key the server binds
-// all interfaces — in a Sandbox the platform attaches to <pod>:4000 through
-// the run's headless Service, which goose's default loopback bind would
-// refuse. Without a key (bare CLI use) it stays loopback-only; an
-// unauthenticated ACP server must never be reachable off-host.
-func StartServe(ctx context.Context, port int, secretKey, provider, model, apiKey, endpoint string) (*ServeProcess, error) {
+// With cfg.BindLoopback the server stays on 127.0.0.1 regardless of key —
+// used when the harness ACP tee is the pod's external endpoint and goose
+// must not be reachable off-host directly. Otherwise bind address follows
+// authentication: with a secret key the server binds all interfaces — in
+// a Sandbox the platform attaches to <pod>:4000 through the run's
+// headless Service, which goose's default loopback bind would refuse.
+// Without a key (bare CLI use) it stays loopback-only; an unauthenticated
+// ACP server must never be reachable off-host.
+// ServeConfig configures StartServe. The zero value is a bare,
+// unauthenticated loopback server on DefaultACPPort — enough for CLI use
+// and tests; a Sandbox sets SecretKey and the model fields.
+type ServeConfig struct {
+	// Port to listen on; 0 means DefaultACPPort.
+	Port int
+	// BindLoopback keeps goose on 127.0.0.1 even with a SecretKey set —
+	// the harness ACP tee is then the pod's external endpoint.
+	BindLoopback bool
+	// SecretKey is the ACP authentication key (config.Config.ACPSecretKey).
+	SecretKey string
+	// Provider, Model, APIKey and Endpoint are translated to the
+	// provider-specific env vars goose expects.
+	Provider string
+	Model    string
+	APIKey   string
+	Endpoint string
+}
+
+func StartServe(ctx context.Context, cfg ServeConfig) (*ServeProcess, error) {
+	port, bindLoopback, secretKey := cfg.Port, cfg.BindLoopback, cfg.SecretKey
+	provider, model, apiKey, endpoint := cfg.Provider, cfg.Model, cfg.APIKey, cfg.Endpoint
 	goosePath, err := exec.LookPath("goose")
 	if err != nil {
 		return nil, fmt.Errorf("goose not found: %w", err)
@@ -52,7 +81,7 @@ func StartServe(ctx context.Context, port int, secretKey, provider, model, apiKe
 	}
 
 	host := "127.0.0.1"
-	if secretKey != "" {
+	if secretKey != "" && !bindLoopback {
 		host = "0.0.0.0"
 	}
 

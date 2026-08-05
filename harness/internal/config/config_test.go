@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func clearKonveyorEnv(t *testing.T) {
@@ -26,6 +27,9 @@ func clearKonveyorEnv(t *testing.T) {
 		"KONVEYOR_WORKFLOW_STAGE",
 		"KONVEYOR_WORKFLOW_STAGE_COUNT",
 		"HUB_TOKEN_ID",
+		"HARNESS_ACP_TEE",
+		"HARNESS_HITL_STEER",
+		"HARNESS_HITL_TIMEOUT_SECONDS",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -230,5 +234,31 @@ func TestLoadFromEnvWorkflowStageFieldsOptional(t *testing.T) {
 	}
 	if cfg.HubTokenID != "" {
 		t.Errorf("HubTokenID should be empty when not set, got %q", cfg.HubTokenID)
+	}
+}
+
+func TestHITLTimeoutClampedAndSteerSwitch(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+
+	t.Setenv("HARNESS_HITL_TIMEOUT_SECONDS", "999999")
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if want := time.Duration(MaxHITLTimeoutSeconds) * time.Second; cfg.HITLTimeout != want {
+		t.Errorf("HITLTimeout not clamped: got %v want %v", cfg.HITLTimeout, want)
+	}
+	if !cfg.HITLSteer {
+		t.Error("HITLSteer should default on")
+	}
+
+	t.Setenv("HARNESS_HITL_STEER", " OFF ")
+	cfg, err = LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if cfg.HITLSteer {
+		t.Error("HARNESS_HITL_STEER=OFF (padded, uppercase) should disable steering")
 	}
 }
