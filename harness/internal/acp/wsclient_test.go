@@ -231,3 +231,83 @@ func TestPanickingHandlerStillReplies(t *testing.T) {
 		t.Fatalf("error code %v, want -32603", code)
 	}
 }
+
+// TestCallDrainsResponseOnShutdown proves that Call returns the response
+// even when the server closes the connection immediately after sending it.
+// Without the drain, select picks randomly between done and respCh,
+// failing ~50% of the time with "websocket connection closed".
+func TestCallDrainsResponseOnShutdown(t *testing.T) {
+	s := newDemuxServer(t)
+	c := s.dial(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type callOut struct {
+		result json.RawMessage
+		err    error
+	}
+	done := make(chan callOut, 1)
+	go func() {
+		result, _, err := c.Call(ctx, "test/method", nil)
+		done <- callOut{result, err}
+	}()
+
+	req := s.next()
+	id := int64(req["id"].(float64))
+
+	// Send the response and immediately close the server-side connection.
+	// This maximizes the chance that readLoop routes the response to respCh
+	// and then closes done before Call's select runs.
+	s.push(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"ok":true}}`, id))
+	s.mu.Lock()
+	s.conn.Close()
+	s.mu.Unlock()
+
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("Call returned error: %v (drain failed)", out.err)
+	}
+	if !strings.Contains(string(out.result), "ok") {
+		t.Fatalf("unexpected result: %s", out.result)
+	}
+}
+
+// TestSendPromptDrainsResponseOnShutdown proves that SendPrompt returns the
+// result even when the server closes the connection immediately after
+// sending the final response.
+func TestSendPromptDrainsResponseOnShutdown(t *testing.T) {
+	s := newDemuxServer(t)
+	c := s.dial(t)
+	sc := NewSessionClient(c)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type promptOut struct {
+		res *PromptResult
+		err error
+	}
+	done := make(chan promptOut, 1)
+	go func() {
+		res, err := sc.SendPrompt(ctx, "s1", []ContentBlock{{Type: "text", Text: "go"}}, 0)
+		done <- promptOut{res, err}
+	}()
+
+	req := s.next()
+	id := int64(req["id"].(float64))
+
+	// Send the response and immediately close the server-side connection.
+	s.push(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"stopReason":"end_turn"}}`, id))
+	s.mu.Lock()
+	s.conn.Close()
+	s.mu.Unlock()
+
+	out := <-done
+	if out.err != nil {
+		t.Fatalf("SendPrompt returned error: %v (drain failed)", out.err)
+	}
+	if out.res.StopReason != "end_turn" {
+		t.Fatalf("StopReason = %q, want end_turn", out.res.StopReason)
+	}
+}

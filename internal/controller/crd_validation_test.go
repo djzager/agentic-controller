@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	konveyoriov1alpha1 "github.com/konveyor/agentic-controller/api/v1alpha1"
 )
@@ -359,13 +360,21 @@ var _ = Describe("CRD Validation", func() {
 			}
 			Expect(k8sClient.Create(ctx, ar)).To(Succeed())
 
-			ar.Spec.AgentRef = "different-agent"
-			err := k8sClient.Update(ctx, ar)
-			Expect(err).To(HaveOccurred())
-			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+			// Re-Get then Update in a retry loop: the reconciler may
+			// patch status between our Get and Update, bumping the
+			// resourceVersion and causing a conflict. Retrying ensures
+			// we eventually hit the webhook validation error.
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(ar), ar); err != nil {
+					return false
+				}
+				ar.Spec.AgentRef = "different-agent"
+				err := k8sClient.Update(ctx, ar)
+				return err != nil && errors.IsInvalid(err)
+			}).Should(BeTrue(), "expected Invalid error on agentRef mutation")
 
 			// Clean up
-			ar.Spec.AgentRef = "original-agent"
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ar), ar)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, ar)).To(Succeed())
 		})
 	})
@@ -496,13 +505,21 @@ var _ = Describe("CRD Validation", func() {
 			}
 			Expect(k8sClient.Create(ctx, apr)).To(Succeed())
 
-			apr.Spec.WorkflowRef = "different-workflow"
-			err := k8sClient.Update(ctx, apr)
-			Expect(err).To(HaveOccurred())
-			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+			// Re-Get then Update in a retry loop: the reconciler may
+			// patch status between our Get and Update, bumping the
+			// resourceVersion and causing a conflict. Retrying ensures
+			// we eventually hit the webhook validation error.
+			Eventually(func() bool {
+				if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(apr), apr); err != nil {
+					return false
+				}
+				apr.Spec.WorkflowRef = "different-workflow"
+				err := k8sClient.Update(ctx, apr)
+				return err != nil && errors.IsInvalid(err)
+			}).Should(BeTrue(), "expected Invalid error on workflowRef mutation")
 
 			// Clean up
-			apr.Spec.WorkflowRef = "original-workflow"
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(apr), apr)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, apr)).To(Succeed())
 		})
 	})

@@ -329,7 +329,18 @@ func (c *WSClient) Call(ctx context.Context, method string, params any) (json.Ra
 		case <-ctx.Done():
 			return nil, notifications, ctx.Err()
 		case <-c.done:
-			return nil, notifications, fmt.Errorf("websocket connection closed")
+			// readLoop exited. The response may already be routed to
+			// respCh — drain it before giving up.
+			select {
+			case msg := <-respCh:
+				notifications = append(notifications, drainNotifications(notifCh)...)
+				if msg.Error != nil {
+					return nil, notifications, fmt.Errorf("ACP error %d: %s", msg.Error.Code, msg.Error.Message)
+				}
+				return msg.Result, notifications, nil
+			default:
+				return nil, notifications, fmt.Errorf("websocket connection closed")
+			}
 		case n := <-notifCh:
 			notifications = append(notifications, n)
 		case msg := <-respCh:
