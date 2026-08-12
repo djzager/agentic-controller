@@ -124,6 +124,15 @@ func runStage(cmd *cobra.Command, args []string) error {
 	}
 	logging.Ok("cloned to %s, branch %s", cloneDir, creds.Branch)
 
+	// Base of this stage run: everything past this commit is work the run
+	// produced. Push compares HEAD against it so runs that produce no
+	// commits do not create empty remote branches.
+	baseSHA, err := git.HeadSHA(repo)
+	if err != nil {
+		// Fail open — an unknown base must never block a push of real work.
+		logging.Warn("resolve base commit: %v", err)
+	}
+
 	// 4. Discover skills early — controls which setup steps run
 	skillPaths, err := discoverSkills()
 	if err != nil {
@@ -255,7 +264,7 @@ func runStage(cmd *cobra.Command, args []string) error {
 		})
 	}
 	var pushSeq atomic.Int64
-	emitPush := func(title string, fn func() error) error {
+	emitPush := func(title string, fn func() (bool, error)) (bool, error) {
 		if teeSrv == nil {
 			return fn()
 		}
@@ -264,7 +273,7 @@ func runStage(cmd *cobra.Command, args []string) error {
 			"sessionUpdate": "tool_call", "toolCallId": id, "title": title,
 			"kind": "execute", "status": "in_progress",
 		})
-		err := fn()
+		pushed, err := fn()
 		status := "completed"
 		if err != nil {
 			status = "failed"
@@ -272,7 +281,7 @@ func runStage(cmd *cobra.Command, args []string) error {
 		teeSrv.EmitRunUpdate(map[string]any{
 			"sessionUpdate": "tool_call_update", "toolCallId": id, "status": status,
 		})
-		return err
+		return pushed, err
 	}
 	emitNotice := func(format string, args ...any) {
 		if teeSrv == nil {
@@ -294,9 +303,10 @@ func runStage(cmd *cobra.Command, args []string) error {
 
 	// 8. Start filesystem watcher BEFORE blocking prompt
 	pushFn := func() error {
-		return emitPush("git push (auto-commit watcher)", func() error {
-			return git.Push(ctx, creds, repo, creds.Branch)
+		_, err := emitPush("git push (auto-commit watcher)", func() (bool, error) {
+			return git.Push(ctx, creds, repo, creds.Branch, baseSHA)
 		})
+		return err
 	}
 	w, err := watcher.New(cloneDir, pushFn)
 	if err != nil {
@@ -355,27 +365,37 @@ func runStage(cmd *cobra.Command, args []string) error {
 	logging.Header("Final Push")
 	pushCtx, pushCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer pushCancel()
-	if err := emitPush("git push (final)", func() error {
-		return git.Push(pushCtx, creds, repo, creds.Branch)
-	}); err != nil {
+	pushed, err := emitPush("git push (final)", func() (bool, error) {
+		return git.Push(pushCtx, creds, repo, creds.Branch, baseSHA)
+	})
+	if err != nil {
 		emitNotice("stage failed — final push error: %v", err)
 		return fmt.Errorf("final push: %w", err)
 	}
 	emitPlan("completed", "completed", "completed")
 
-	// 15. Exit
+	// 15. Exit. pushed is false when the run produced no commits, so the
+	// notices must not claim work landed on the branch.
 	if stageFailed {
 		switch {
-		case cancelled:
+		case cancelled && pushed:
 			emitNotice("run cancelled by viewer — partial work pushed to branch %s", creds.Branch)
-		default:
+		case cancelled:
+			emitNotice("run cancelled by viewer — no commits to push")
+		case pushed:
 			emitNotice("stage failed — partial work pushed to branch %s", creds.Branch)
+		default:
+			emitNotice("stage failed — no commits to push")
 		}
 		logging.Err("stage failed")
 		return fmt.Errorf("stage failed")
 	}
 	stageSucceeded = true
-	emitNotice("stage succeeded — results pushed to branch %s", creds.Branch)
+	if pushed {
+		emitNotice("stage succeeded — results pushed to branch %s", creds.Branch)
+	} else {
+		emitNotice("stage succeeded — no changes to push")
+	}
 	logging.Ok("stage succeeded")
 	return nil
 }
