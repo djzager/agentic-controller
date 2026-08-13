@@ -67,18 +67,21 @@ introduce phases within stages for session continuity via shared PVCs.
 
 **AgentRun** — A request to execute a single Agent with specific
 selections. References an Agent, selects which Gateway to use for
-this run (from the Agent's available set), carries instructions and
-generic parameters (key-value pairs injected as environment variables
-into the sandbox). The controller validates that the selected Gateway
-is in the Agent's gateway list and that the Gateway CR exists, creates
-a sandbox, and tracks status to completion. When OpenShell is
-integrated, Gateway CRs will be replaced by OpenShell Gateway Services
-and sandboxes will be created through the OpenShell gateway API. Parameters are
-domain-agnostic — the controller passes them through without
-interpretation. For Konveyor-managed agents, Hub injects connectivity
-info (`HUB_BASE_URL`, `APP_ID`, scoped API token) into the
-AgentRun's env at create time; the harness resolves application
-metadata from Hub at runtime.
+this run (from the Agent's available set), carries instructions,
+generic parameters (key-value pairs), and a mode (`auto` or
+`approve`). The controller validates the selected Gateway, performs
+`$(scope.name)` variable substitution in prompt text fields, writes
+resolved parameters and execution controls to
+`/run/konveyor/params.json`, creates a sandbox, and tracks status to
+completion. Parameters are domain-agnostic — the controller passes
+them through without interpretation. Execution limits (`maxTurns`,
+`maxCost`) are set on the Agent; mode is set on the AgentRun. For
+Konveyor-managed agents, Hub injects connectivity info
+(`HUB_BASE_URL`, `APP_ID`, scoped API token) into the AgentRun's
+env at create time; the harness resolves application metadata from
+Hub at runtime.
+_Avoid_: putting execution controls (turn limits, cost budgets) in
+skills or in arbitrary params — these are CRD-level concerns.
 
 **AgentWorkflowRun** — A request to execute an AgentWorkflow. References an
 AgentWorkflow (or inlines the spec) and carries generic parameters,
@@ -168,7 +171,9 @@ data at create time — the harness resolves at runtime. Hub is
 fire-and-forget; it does not launch or manage agent workloads.
 
 **Harness** — The Go binary entrypoint in the agent base image,
-analogous to the addon adapter (`shared/addon/adapter`) in Hub. In
+analogous to the addon adapter (`shared/addon/adapter`) in Hub. The
+harness reads its configuration from `/run/konveyor/params.json`
+(written by the controller) and environment variables. In
 Konveyor-managed mode (`HUB_BASE_URL` + `APP_ID` set), the harness
 acts as a Hub client: resolves the application's git URL, branch,
 and decrypted credentials from Hub, clones the repo, and configures
@@ -177,14 +182,25 @@ harness, not in the agent's env or git config). On exit, the harness
 revokes its Hub API token — except in workflow stages where stages
 share a token; the harness revokes only on the last stage (determined
 via `KONVEYOR_WORKFLOW_STAGE` / `KONVEYOR_WORKFLOW_STAGE_COUNT` env
-vars injected by the controller). In standalone mode
-(no `HUB_BASE_URL`), the harness reads git coordinates from
-`KONVEYOR_PARAM_*` env vars and credentials from mounted Secrets. In
-both modes, the harness launches the agent runtime and pushes to the
-target branch on exit. The agent commits locally; the harness pushes.
-The harness is domain-specific — other platforms can provide their
-own harness for their use case. The controller is agnostic to which
-harness the base image carries.
+vars injected by the controller). The harness translates runtime-agnostic CRD values (mode, maxTurns)
+to runtime-specific configuration (e.g. `GOOSE_MAX_TURNS`,
+`GOOSE_MODE` env vars). It monitors ACP `usage_update` notifications
+for cumulative cost and enforces cost limits via cancel-then-handoff.
+Turn limits are enforced by the runtime natively; the harness
+reserves 15-20% of the turn budget for a handoff prompt when the
+runtime stops. On exit, the harness writes usage data to
+`/dev/termination-log` as opaque JSON; the controller copies it to
+`AgentRunStatus.terminationData` without interpretation.
+In both modes, the harness launches the agent
+runtime and pushes to the target branch on exit. The agent commits
+locally; the harness pushes. The harness is domain-specific — other
+platforms can provide their own harness for their use case. The
+controller is agnostic to which harness the base image carries. The
+`params.json` file shape and execution control semantics form the
+harness contract — any harness implementation must honor them.
+_Avoid_: putting execution control in skills — skills contain
+knowledge and judgment; the harness controls how long, how much, and
+in what mode the agent runs.
 
 **Memory Service** — A persistent, queryable knowledge base owned by
 an Agent, accessible via MCP. The agent reads from it at session
@@ -192,6 +208,45 @@ start and writes discoveries at session end. Accumulates domain
 knowledge (patterns, pitfalls, API mappings) across executions,
 enabling organizational learning. Each Agent has its own memory
 service instance.
+
+## Execution Concepts
+
+**Mode** — Supervision policy for an agent execution: `auto`
+(all tool calls approved automatically, headless-safe) or `approve`
+(tool calls require explicit human approval via the ACP tee).
+Defaults to `auto`. Set on AgentRun for standalone runs and on
+individual AgentWorkflow stages for workflow runs. When `approve` is
+set with no viewer attached, the tee's fail-closed policy denies all
+tool calls. Who can set mode is an authorization concern owned by
+Hub/UI, not the controller.
+_Avoid_: `smart_approve` (goose-specific, functionally identical to
+`approve` for agents that write files and run commands);
+`interactive`/`non-interactive` (use `approve`/`auto` instead).
+
+**Execution Limits** — Optional budget constraints on an agent
+execution: `maxTurns` (tool-call turns) and `maxCost` (cumulative
+USD). Set on Agent as defaults, overrideable per stage and per run.
+Whichever limit is hit first triggers wind-down. The harness reserves
+15–20% of the budget for a handoff prompt — when the primary budget
+is exhausted, the harness cancels the current work and sends a final
+prompt for the agent to write a handoff. Only standard ACP
+`usage_update` data (`used`, `size`, cumulative `cost`) is used for
+enforcement. `maxTokens` is intentionally excluded — the ACP
+`usage_update` reports context-window occupancy, not cumulative
+consumption, making it unsuitable as a budget metric.
+_Avoid_: encoding limits in skills as LLM instructions (e.g.
+`MAX_FIX_ITERATIONS`) — limits are harness concerns, not skill
+concerns.
+
+**Skill Content Boundary** — A skill contains knowledge and judgment
+criteria. It never contains execution control. Allowed: domain
+knowledge, approach guidance, quality criteria, output format,
+judgment calls ("if stuck, write a handoff"). Not allowed: reading
+env vars, counting iterations, branching on exit codes, running
+infrastructure tools, git operations, filesystem discovery.
+_Avoid_: telling the LLM to read parameters from the environment or
+count its own iterations — if a program could do it deterministically,
+it belongs in the harness.
 
 ## Relationships
 
