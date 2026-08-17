@@ -1,6 +1,10 @@
 # ADR 0004: OpenShell as Execution Interface
 
-**Status:** Accepted
+**Status:** Accepted — aspirational / deferred. Its *No Gateway CRD* and
+*LLMProvider removed / controller becomes an OpenShell client now* clauses
+are superseded by ADR 0016; the OpenShell end-state described here remains
+the deferred target, pending the OpenShell Go SDK reaching GA and team
+buy-in. See ADR 0016 for the interim Gateway CRD that ships today.
 **Date:** 2026-07-20
 **Authors:** David Zager
 
