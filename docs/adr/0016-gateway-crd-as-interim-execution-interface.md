@@ -86,11 +86,22 @@ Only these clauses:
   provider-specific credential mapping — stands as the deferred target.
 - One gateway = one model = one run.
 
-### Trigger to revisit
+### Revisiting OpenShell — two separate bars
 
-Revisit when **both** hold: the OpenShell Go SDK is GA (not a pre-release of
-NVIDIA/OpenShell#2270), and the team has bought into taking the runtime
-dependency. Until then this ADR is the accepted state.
+**Evaluating OpenShell behind a non-default feature flag is sanctioned now**
+and does not require superseding this ADR. The OpenShell Go SDK is integrated
+in-tree in NVIDIA/OpenShell (first beta ~mid-September 2026) and its
+maintainers have invited integration feedback. A controller execution-backend
+feature flag — **default off** — that creates sandboxes through the OpenShell
+Go SDK is exploratory work this ADR permits. It does not change the accepted
+default below. This is the path taken by the spike in #144.
+
+**Flipping the default to OpenShell is a separate decision that still needs a
+new ADR.** Making OpenShell the execution interface — and removing the Gateway
+CRD and `agents.x-k8s.io` RBAC (the ADR 0004 end-state, tracked in #144) —
+requires the SDK to be GA, team buy-in, and a superseding ADR. Until that
+lands, the Gateway CRD is the accepted default and this ADR is the accepted
+state.
 
 ### Naming
 
