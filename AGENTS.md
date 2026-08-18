@@ -44,6 +44,33 @@ It will challenge the plan against the existing domain model in
 - One logical change per commit
 - Reference issue numbers when applicable
 
+### Submitting a PR
+
+Two repo conventions are enforced by CI (`.github/workflows/pr-checks.yml`)
+and are easy to miss. Use the `submit-pr` skill for the full workflow.
+
+**1. Title prefix.** Every PR title must start with an emoji alias
+(use the alias, e.g. `:bug:`, not the character):
+
+| Prefix        | Meaning                   | Changelog fragment? |
+| ------------- | ------------------------- | ------------------- |
+| `:warning:`   | Breaking change           | required            |
+| `:sparkles:`  | Non-breaking feature      | required            |
+| `:bug:`       | Patch / bug fix           | required            |
+| `:book:`      | Docs                      | no                  |
+| `:seedling:`  | Infra / tests / other     | no                  |
+| `:ghost:`     | No release note           | no                  |
+
+Example: `:sparkles: Add agent status reporting`.
+
+**2. Changelog fragment.** PRs prefixed `:warning:`, `:sparkles:`, or
+`:bug:` require a fragment in `changes/unreleased/`. Create one with:
+
+    make changelog-create NAME=<pr-number>-<short-description> KIND=<kind>
+
+`KIND` is one of: `breaking`, `feature`, `enhancement`, `bugfix`,
+`deprecation`. Commit the generated file with your change.
+
 ### Domain language
 
 Always use the terms defined in `CONTEXT.md`. If you're unsure about
@@ -82,3 +109,5 @@ workflows:
   relentless questioning
 - `skills/grill-with-docs/` — Same as grill-me but updates
   CONTEXT.md and creates ADRs inline as decisions crystallise
+- `skills/submit-pr/` — Open a PR that satisfies this repo's CI
+  checks: correct emoji title prefix and changelog fragment
