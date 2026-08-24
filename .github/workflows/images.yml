@@ -137,7 +137,10 @@ jobs:
           base_image: agent-base--pr${{ github.event.pull_request.number }}-${{ matrix.arch_info.arch }}
           base_image_arg: BASE_IMAGE
 
+  # PR-time build check only. The versioned build+push of the controller
+  # image lives in image-build-push.yml (filter-free so tag pushes fire).
   controller:
+    if: github.event_name == 'pull_request'
     permissions:
       contents: read
     name: Build controller image
@@ -150,15 +153,3 @@ jobs:
 
       - name: Build image
         run: make docker-build
-
-      - name: Log in to Quay.io
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: quay.io
-          username: ${{ vars.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Push image
-        if: github.event_name != 'pull_request'
-        run: make docker-push
