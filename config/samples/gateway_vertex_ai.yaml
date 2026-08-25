@@ -2,10 +2,14 @@
 #
 # Prerequisites:
 #   kubectl create secret generic vertex-credentials \
-#     --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$HOME/.config/gcloud/application_default_credentials.json"
+#     --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$HOME/.config/gcloud/application_default_credentials.json" \
+#     --from-literal=GCP_PROJECT_ID="$(gcloud config get-value project)" \
+#     --from-literal=GCP_LOCATION=global
 #
 # The credential Secret uses envFrom (no key field) because Vertex AI
-# requires GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var name.
+# requires GOOGLE_APPLICATION_CREDENTIALS_JSON as an env var name. The
+# whole Secret is exposed via envFrom, so GCP_PROJECT_ID (required by
+# goose's Vertex provider) and GCP_LOCATION ride along too.
 apiVersion: konveyor.io/v1alpha1
 kind: Gateway
 metadata:

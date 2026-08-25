@@ -6,7 +6,10 @@ AgentRun to trigger execution.
 
 ## Prerequisites
 
-- Kubernetes 1.33+ (ImageVolume GA) or OpenShift 4.20+
+- Kubernetes 1.33+ or OpenShift 4.20+ (the controller mounts skills via
+  the ImageVolume feature — a beta gate that is **off by default** on
+  Kubernetes 1.33–1.34, so enable `ImageVolume` there; it is on by
+  default from 1.35 and GA in 1.36)
 - [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
   v0.5.x installed in the cluster
 - `kubectl` and `helm` configured to talk to the cluster
@@ -20,7 +23,7 @@ Agent Sandbox must be installed before the controller can execute
 AgentRuns.
 
 ```bash
-AGENT_SANDBOX_TAG=v0.5.0
+AGENT_SANDBOX_TAG=v0.5.5
 
 # Clone and install via Helm
 git clone --depth 1 --branch $AGENT_SANDBOX_TAG \
@@ -38,6 +41,15 @@ kubectl wait deployment/agent-sandbox-controller \
   --timeout=120s
 ```
 
+> **Note:** The clone + `helm install` path above and the upstream
+> release manifest (`kubectl apply -f .../<tag>/sandbox-with-extensions.yaml`)
+> are **alternative** install methods — use one, not both. Mixing them
+> makes helm and `kubectl apply` fight over the same cluster-scoped CRDs,
+> and backing out means deleting those CRDs (taking every Sandbox on the
+> cluster with them). Note also that the release assets were renamed at
+> v0.5.2 (`manifest.yaml` → `sandbox.yaml`), so pin a v0.5.2+ tag if you
+> follow the release-manifest path.
+
 > **Future:** [OpenShell](https://github.com/NVIDIA/OpenShell) will
 > replace the direct Agent Sandbox dependency. When integrated, the
 > controller will provision sandboxes through the OpenShell gateway
@@ -46,14 +58,21 @@ kubectl wait deployment/agent-sandbox-controller \
 
 ## 2. Deploy the controller and default skills
 
-Build and push the controller image, then deploy with kustomize:
+The default image `quay.io/konveyor/agentic-controller:latest` is public
+and rebuilt on every merge to `main`, so you can deploy straight away
+with no build step:
 
 ```bash
-# Build the controller image (adjust IMG for your registry)
-export IMG=quay.io/konveyor/agentic-controller:latest
-make docker-build docker-push IMG=$IMG
-
 # Deploy CRDs, RBAC, and the controller manager
+make deploy
+```
+
+To build and push your own image instead (e.g. to test local changes),
+set `IMG` to a registry you can push to:
+
+```bash
+export IMG=quay.io/<your-org>/agentic-controller:dev
+make docker-build docker-push IMG=$IMG
 make deploy IMG=$IMG
 ```
 
@@ -109,8 +128,17 @@ Create a Secret with your GCP application default credentials:
 gcloud auth application-default login
 
 kubectl create secret generic vertex-credentials \
-  --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$HOME/.config/gcloud/application_default_credentials.json"
+  --from-file=GOOGLE_APPLICATION_CREDENTIALS_JSON="$HOME/.config/gcloud/application_default_credentials.json" \
+  --from-literal=GCP_PROJECT_ID="$(gcloud config get-value project)" \
+  --from-literal=GCP_LOCATION=global
 ```
+
+The whole Secret is exposed to the agent via `envFrom`, so `GCP_PROJECT_ID`
+and `GCP_LOCATION` ride along with the credentials file. goose's Vertex
+provider **requires** `GCP_PROJECT_ID` (there is no default and the run
+fails at first token without it). `GCP_LOCATION` is optional — goose
+defaults to `us-central1` — but `global` matches the sample Gateway
+endpoint.
 
 Apply the Gateway:
 
@@ -147,17 +175,35 @@ kubectl create secret generic bedrock-credentials \
 kubectl apply -f config/samples/gateway_aws_bedrock.yaml
 ```
 
-The `AWS_REGION` above must match the region in the Gateway's
-`endpoint` and the region prefix in its `model` name (both `us-east-1`
-in the sample). To use a different region, edit `endpoint`,
-`AWS_REGION`, and the model's inference-profile prefix together in
-`config/samples/gateway_aws_bedrock.yaml`.
+`AWS_REGION` is what goose actually uses to reach Bedrock — the harness
+derives the Bedrock endpoint from it and ignores the Gateway `endpoint`,
+which only feeds the controller's connectivity check. Keep the Gateway
+`endpoint` in the same region as `AWS_REGION` so that check stays
+meaningful. The model's `us.` prefix is a **cross-region inference
+profile** spanning the US regions (us-east-1/us-east-2/us-west-2), so
+switching between US regions needs no model change — only moving to
+another geo (`eu.`, `apac.`) requires a new prefix.
+
+### Option E: xAI (Grok)
+
+```bash
+kubectl create secret generic grok-credentials \
+  --from-literal=api-key="<your-xai-api-key>"
+
+kubectl apply -f config/samples/gateway_xai.yaml
+```
 
 Verify the Gateway is ready:
 
 ```bash
-kubectl get gateways
+kubectl get gateways.konveyor.io
 ```
+
+> **Note:** Use the fully-qualified `gateways.konveyor.io` rather than the
+> bare `gateways`. On any cluster with the Gateway API CRDs installed
+> (OpenShift 4.19+ does this by default), `gateways` resolves to
+> `gateways.gateway.networking.k8s.io` instead, so `kubectl get gateways`
+> would report no resources right after you applied your Gateway.
 
 The `Verified` column shows whether the controller confirmed
 connectivity to the endpoint.
@@ -196,13 +242,23 @@ kubectl get agents
 ## 5. Create an AgentRun
 
 An AgentRun triggers execution of an Agent. It references an Agent,
-selects a Gateway, supplies parameter values, and carries
-task-specific instructions. The controller validates the
+selects a Gateway, carries task-specific instructions, and sets the
+environment the harness needs. The controller validates the
 configuration, creates an Agent Sandbox, and tracks the run to
 completion.
 
-Apply the example AgentRun (edit it first to set your source
-repository URL):
+> **Prerequisite — Konveyor Hub.** The `agent-java` image resolves the
+> repository to migrate and its git credentials from a Konveyor Hub,
+> keyed by `APP_ID`. Before running, install Hub — `hack/install-konveyor.sh`
+> installs the tackle2-operator with auth disabled — and register the
+> application you want to migrate, noting its `APP_ID`. The sample
+> AgentRun's `spec.env` points at the in-cluster Hub service with
+> `APP_ID: "1"`; edit `HUB_BASE_URL`, `APP_ID`, and `TARGET_BRANCH` to
+> match your Hub and application. Hub-free standalone runs are not
+> supported yet
+> ([#122](https://github.com/konveyor/agentic-controller/issues/122)).
+
+Apply the example AgentRun:
 
 ```bash
 kubectl apply -f config/samples/agentrun_example.yaml
@@ -243,6 +299,7 @@ All sample CRs are in `config/samples/`:
 | `gateway_openai.yaml` | Gateway | OpenAI GPT-4o |
 | `gateway_anthropic.yaml` | Gateway | Anthropic direct API |
 | `gateway_aws_bedrock.yaml` | Gateway | AWS Bedrock |
+| `gateway_xai.yaml` | Gateway | xAI (Grok) |
 | `agent_example.yaml` | Agent | Java migration agent |
 | `agentrun_example.yaml` | AgentRun | Triggers the migration agent |
 | `skillcard_*.yaml` | SkillCard | Migration skills (applied via `kubectl apply -k config/samples/`) |
@@ -279,7 +336,7 @@ meant to keep:
 # Delete runs, agents, and gateways in the current namespace
 kubectl delete agentruns --all
 kubectl delete agents --all
-kubectl delete gateways --all
+kubectl delete gateways.konveyor.io --all
 ```
 
 > **Warning:** `make undeploy` and `make uninstall` delete the CRDs,
@@ -318,7 +375,7 @@ The controller could not reach the endpoint. Check:
 
 The Agent references Gateways or SkillCards that don't exist or
 aren't ready. Check:
-- `kubectl get gateways` — all referenced gateways must exist
+- `kubectl get gateways.konveyor.io` — all referenced gateways must exist
 - `kubectl get skillcards` — all referenced skills must be resolved
 
 **AgentRun stuck in `Pending`**

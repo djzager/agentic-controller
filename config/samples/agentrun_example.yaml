@@ -6,6 +6,9 @@
 # Prerequisites:
 #   - The referenced Agent CR (e.g. agent_example.yaml)
 #   - The Gateway selected here must be in the Agent's gateway list
+#   - A Konveyor Hub with the application registered — the harness clones
+#     the repo and reads git credentials from Hub by APP_ID. See
+#     hack/install-konveyor.sh and docs/getting-started.md section 5.
 apiVersion: konveyor.io/v1alpha1
 kind: AgentRun
 metadata:
@@ -21,10 +24,17 @@ spec:
   # bare string because it selects exactly one.
   gateway: gcp-vertex-ai
 
-  # Supply values for the Agent's declared parameters.
-  params:
-    - name: source_url
-      value: "https://github.com/konveyor-ecosystem/coolstore.git"
+  # The harness resolves the repository and git credentials from Konveyor
+  # Hub by APP_ID and reads the target branch from TARGET_BRANCH, so this
+  # run carries a Hub connection rather than source_url/target_branch
+  # params. Edit these to match your Hub and registered application.
+  env:
+    - name: HUB_BASE_URL
+      value: "http://tackle-hub.konveyor-tackle.svc:8080"
+    - name: APP_ID
+      value: "1"
+    - name: TARGET_BRANCH
+      value: "konveyor/migration"
 
   # Task-specific instructions for this run. Composed with the
   # Agent's prompt at execution time.

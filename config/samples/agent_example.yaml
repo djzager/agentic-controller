@@ -1,8 +1,8 @@
 # Example Agent for Java EE to Quarkus migration.
 #
 # An Agent is a template — it declares what is available (image,
-# gateways, skills, params) but does not execute anything. Create
-# an AgentRun to trigger execution.
+# gateways, skills) but does not execute anything. Create an AgentRun
+# to trigger execution.
 #
 # Prerequisites:
 #   - A Gateway CR (e.g. gateway_vertex_ai.yaml)
@@ -28,13 +28,7 @@ spec:
   skillCards:
     - ref: javaee-to-quarkus
 
-  # Typed parameters. AgentRun supplies values for these.
-  params:
-    - name: source_url
-      type: string
-      description: Git URL of the source repository
-      required: true
-    - name: target_branch
-      type: string
-      description: Branch name for migration results
-      default: konveyor/migration
+  # No params: the agent-java harness resolves the repository to migrate
+  # (and its git credentials) from Konveyor Hub by APP_ID, and reads the
+  # target branch from the TARGET_BRANCH env var — neither comes from run
+  # parameters. See docs/getting-started.md section 5.
