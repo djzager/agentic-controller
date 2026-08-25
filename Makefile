@@ -300,16 +300,17 @@ SKILL_IMAGE ?= quay.io/konveyor/skills:latest
 
 .PHONY: skill-build
 skill-build: ## Build the skill bundle image.
-	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f skills/Containerfile skills
+	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f catalog/Containerfile catalog
 
 .PHONY: skill-push
 skill-push: skill-build ## Build and push the skill bundle image.
 	$(CONTAINER_TOOL) push $(SKILL_IMAGE)
 
 # A skill is one directory deep, so a directory of directories is not itself a
-# bundle and its contents are not seen. skills/examples/ is therefore named
-# separately rather than being silently skipped.
-SKILL_TREES ?= skills skills/examples
+# bundle and its contents are not seen. Each tree is therefore named: the
+# shipped bundle (catalog/skills), the single-skill worked examples
+# (catalog/examples), and the repo's own maintainer workflow skills (skills).
+SKILL_TREES ?= catalog/skills catalog/examples skills
 
 .PHONY: skill-validate
 skill-validate: ## Check every SKILL.md frontmatter parses and is complete.

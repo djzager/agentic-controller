@@ -5,7 +5,7 @@
 # of a third-party skill that ships on its own.
 #
 #   podman build -t quay.io/example/ejb-to-cdi:dev \
-#     -f skills/examples/ejb-to-cdi/Containerfile skills/examples/ejb-to-cdi
+#     -f catalog/examples/ejb-to-cdi/Containerfile catalog/examples/ejb-to-cdi
 
 FROM scratch
 

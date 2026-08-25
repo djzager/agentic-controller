@@ -1,0 +1,29 @@
+# Skill bundle image.
+#
+# A skill image is an ordinary OCI image whose root holds AgentSkills.io
+# skill directories. One image may carry a single skill (SKILL.md at the
+# root) or many (one subdirectory per skill) — the loader detects which.
+# This is the many case.
+#
+# Build context is this directory (catalog/), so everything that ships is
+# under catalog/skills/ and nothing else is in scope. Worked examples of
+# the single-skill shape live in catalog/examples/ and are deliberately
+# outside this build context, so they never ship in the bundle.
+#
+#   podman build -t quay.io/konveyor/skills:dev -f catalog/Containerfile catalog
+#
+# The repository's own maintainer workflow skills (grill-me, submit-pr, …)
+# live in the top-level skills/ directory, not here, so they cannot leak
+# into the shipped image.
+
+FROM scratch
+
+# COPY the *contents* of catalog/skills into the image root: each immediate
+# subdirectory (plan, execute, verify, javaee-to-quarkus) becomes one skill
+# at /<name>/SKILL.md. Because catalog/skills holds only shipped skills,
+# this needs no per-skill allowlist.
+COPY skills/ /
+
+LABEL org.opencontainers.image.title="konveyor-skills" \
+      org.opencontainers.image.description="Konveyor migration skills (AgentSkills.io format)" \
+      org.opencontainers.image.source="https://github.com/konveyor/agentic-controller"

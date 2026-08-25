@@ -78,7 +78,7 @@ make skill-build SKILL_IMAGE="${SKILL_BUNDLE_IMG}" CONTAINER_TOOL="${CONTAINER_T
 # Build a FROM-scratch OCI image for each skill and load into Kind.
 # skillctl builds to its own OCI store; we need container images for Kind.
 # Use the skill content directly in a simple container image.
-for dir in skills/examples/*/; do
+for dir in catalog/examples/*/; do
     name=$(basename "${dir}")
     skill_img="quay.io/konveyor/skills:${name}"
     echo "Building skill image: ${skill_img}"
@@ -99,7 +99,7 @@ if [ "${CONTAINER_TOOL}" = "podman" ]; then
     echo "Saving ${SKILL_BUNDLE_IMG} to tarball..."
     ${CONTAINER_TOOL} save "${SKILL_BUNDLE_IMG}" -o "${SKILL_TMP}/bundle.tar"
     kind load image-archive "${SKILL_TMP}/bundle.tar" --name "${KIND_CLUSTER}"
-    for dir in skills/examples/*/; do
+    for dir in catalog/examples/*/; do
         name=$(basename "${dir}")
         skill_img="quay.io/konveyor/skills:${name}"
         echo "Saving ${skill_img} to tarball..."
@@ -109,7 +109,7 @@ if [ "${CONTAINER_TOOL}" = "podman" ]; then
     rm -rf "${SKILL_TMP}"
 else
     kind load docker-image "${SKILL_BUNDLE_IMG}" --name "${KIND_CLUSTER}"
-    for dir in skills/examples/*/; do
+    for dir in catalog/examples/*/; do
         name=$(basename "${dir}")
         kind load docker-image "quay.io/konveyor/skills:${name}" --name "${KIND_CLUSTER}"
     done

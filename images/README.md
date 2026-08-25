@@ -63,8 +63,12 @@ shared `build-push-images.yaml` reusable workflow:
   manifest list under the real tag. agent-base publishes first so the
   language images' `FROM quay.io/konveyor/agent-base` resolves against an
   already-published, genuinely multi-arch manifest.
-- **`skills`** — the skill bundle (amd64), gated on `make skill-validate`
-  so an unusable skill never ships.
+- **`skills`** — the skill bundle (amd64), built from `catalog/` (build
+  context `catalog/`, `catalog/Containerfile`), gated on `make skill-validate`
+  so an unusable skill never ships. Everything under `catalog/skills/` ships;
+  the worked examples in `catalog/examples/` and the repo's maintainer
+  workflow skills in `skills/` are outside that context and never ship
+  (see ADR 0017).
 
 The tag is derived from the ref by the reusable workflow:
 
