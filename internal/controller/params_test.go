@@ -52,7 +52,7 @@ func TestCoerceParams(t *testing.T) {
 	supplied := map[string]string{
 		testParamName: testAppURL,
 		testNumParam:  "5",
-		"dry_run":     "true",
+		"dry_run":     "T", // non-canonical boolean input
 	}
 
 	coerced, strs, err := coerceParams(decls, supplied)
@@ -75,9 +75,19 @@ func TestCoerceParams(t *testing.T) {
 	if _, ok := coerced["unset"]; ok {
 		t.Errorf("unset should be omitted, got %v", coerced["unset"])
 	}
-	// String form preserves the raw value for substitution.
+
+	// Substitution string form is the canonical coerced value, the same
+	// rule both scopes use — so the non-canonical "T" renders as "true".
+	if strs["dry_run"] != "true" {
+		t.Errorf("strs[dry_run] = %q, want canonical \"true\"", strs["dry_run"])
+	}
 	if strs[testNumParam] != "5" {
 		t.Errorf("strs[max_fix] = %q, want \"5\"", strs[testNumParam])
+	}
+	// A declared-but-unset param resolves to empty (present in strs) so
+	// $(agent.unset) renders "" instead of failing as an unresolved ref.
+	if v, ok := strs["unset"]; !ok || v != "" {
+		t.Errorf("strs[unset] = %q (present=%v), want present and empty", v, ok)
 	}
 }
 

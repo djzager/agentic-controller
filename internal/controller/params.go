@@ -67,18 +67,24 @@ func coerceParams(decls []konveyoriov1alpha1.Param, supplied map[string]string) 
 			value = p.Default
 		}
 		if value == "" {
+			// Declared but unset (optional, no default): resolve
+			// $(scope.name) to empty rather than an unresolved-reference
+			// error, and omit it from params.json. Only undeclared
+			// references (never added to strs) fail. Required params are
+			// already caught in validateParams.
+			strs[p.Name] = ""
 			continue
 		}
-		strs[p.Name] = value
 
+		var cv any
 		switch p.Type {
 		case konveyoriov1alpha1.ParamTypeNumber:
 			// Prefer integer, fall back to float, so "25" serializes as
 			// 25 rather than 25.0.
 			if i, err := strconv.ParseInt(value, 10, 64); err == nil {
-				coerced[p.Name] = i
+				cv = i
 			} else if f, err := strconv.ParseFloat(value, 64); err == nil {
-				coerced[p.Name] = f
+				cv = f
 			} else {
 				return nil, nil, fmt.Errorf("parameter %q declared number but value %q is not numeric", p.Name, value)
 			}
@@ -87,10 +93,16 @@ func coerceParams(decls []konveyoriov1alpha1.Param, supplied map[string]string) 
 			if err != nil {
 				return nil, nil, fmt.Errorf("parameter %q declared boolean but value %q is not a boolean", p.Name, value)
 			}
-			coerced[p.Name] = b
+			cv = b
 		default: // string (also the CRD default)
-			coerced[p.Name] = value
+			cv = value
 		}
+		coerced[p.Name] = cv
+		// Substitution renders the canonical coerced value via the single
+		// stringifyJSON rule — the same one the workflow scope uses — so a
+		// value renders identically regardless of which scope references
+		// it (e.g. a boolean is always "true", never the raw "T"/"yes"/"1").
+		strs[p.Name] = stringifyJSON(cv)
 	}
 	return coerced, strs, nil
 }
@@ -205,8 +217,12 @@ func coerceWorkflowParams(decls []konveyoriov1alpha1.Param, supplied map[string]
 	return &runtime.RawExtension{Raw: raw}, strs, nil
 }
 
-// stringifyJSON renders a JSON-decoded value (json.Number, bool, or
-// string, per UseNumber decoding) as the string used in substitution.
+// stringifyJSON is the single rule for rendering a coerced parameter
+// value as the string used in $(scope.name) substitution, shared by both
+// the agent and workflow scopes so a value renders identically whichever
+// scope references it. It handles the types the agent scope produces
+// (int64, float64, bool, string) and the types the workflow scope
+// produces via UseNumber decoding (json.Number, bool, string).
 func stringifyJSON(v any) string {
 	switch t := v.(type) {
 	case json.Number:
@@ -215,6 +231,10 @@ func stringifyJSON(v any) string {
 		return strconv.FormatBool(t)
 	case string:
 		return t
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
 	default:
 		return fmt.Sprintf("%v", t)
 	}

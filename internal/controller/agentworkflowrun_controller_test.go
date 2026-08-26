@@ -182,7 +182,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			updateAgentRunStatus(stageARunName, func(run *konveyoriov1alpha1.AgentRun) {
 				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:   ConditionTypeReady,
+					Type:   konveyoriov1alpha1.AgentRunConditionSucceeded,
 					Status: metav1.ConditionTrue,
 					Reason: reasonSucceeded,
 				})
@@ -211,7 +211,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			updateAgentRunStatus(stageBRunName, func(run *konveyoriov1alpha1.AgentRun) {
 				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:   ConditionTypeReady,
+					Type:   konveyoriov1alpha1.AgentRunConditionSucceeded,
 					Status: metav1.ConditionTrue,
 					Reason: reasonSucceeded,
 				})
@@ -337,7 +337,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				now := metav1.Now()
 				run.Status.CompletionTime = &now
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:   ConditionTypeReady,
+					Type:   konveyoriov1alpha1.AgentRunConditionSucceeded,
 					Status: metav1.ConditionTrue,
 					Reason: reasonSucceeded,
 				})
@@ -526,7 +526,7 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 			updateAgentRunStatus(stageRunName, func(run *konveyoriov1alpha1.AgentRun) {
 				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:   ConditionTypeReady,
+					Type:   konveyoriov1alpha1.AgentRunConditionSucceeded,
 					Status: metav1.ConditionFalse,
 					Reason: "Failed",
 				})

@@ -215,9 +215,10 @@ type AgentRunStatus struct {
 
 // AgentRun is a request to execute a single Agent with specific selections.
 // It references an Agent, selects a gateway, carries instructions and
-// key-value parameters (injected as env vars into the Sandbox). The
-// controller validates, resolves skills to ImageVolumes, creates a Sandbox,
-// and tracks status to completion.
+// key-value parameters (delivered via /run/konveyor/params.json and
+// referenced in prompt text as $(agent.<name>) / $(workflow.<name>) — ADR
+// 0009). The controller validates, resolves skills to ImageVolumes, creates
+// a Sandbox, and tracks status to completion.
 type AgentRun struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

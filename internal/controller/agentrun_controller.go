@@ -192,6 +192,11 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 
+	// Shed the legacy Ready condition on any live run created before it was
+	// removed from AgentRun (ADR 0018); the terminal outcome now lives on
+	// Succeeded, serving on ACPReady. Runs clean up on their next reconcile.
+	meta.RemoveStatusCondition(&run.Status.Conditions, ConditionTypeReady)
+
 	// Look up the referenced Agent.
 	var agent konveyoriov1alpha1.Agent
 	agentKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.AgentRef}
@@ -214,24 +219,30 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.patchRunStatus(ctx, &run, original)
 	}
 
-	// Validate params against Agent declarations. The resolved params and
-	// substitution scopes are reused by createSandbox below.
-	params, scopes, err := r.validateParams(&run, &agent)
-	if err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		setRunSucceeded(&run, metav1.ConditionFalse, "InvalidParams", err.Error())
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// Validate gateway selection against Agent's available gateways.
-	if err := r.validateGateway(&run, &agent); err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// If no Sandbox exists yet, create one.
+	// If no Sandbox exists yet, validate config against the Agent and
+	// create it. Validation runs only here, not on every reconcile of a
+	// live run: the Sandbox bakes in the rendered prompt/params at
+	// creation, so re-validating a running run against a since-edited
+	// Agent would change nothing except to spuriously fail it. (Immunity
+	// of not-yet-created workflow stages to Agent edits is tracked
+	// separately in #180.)
 	if run.Status.SandboxName == "" {
+		// Validate params against Agent declarations; the resolved params
+		// and substitution scopes feed createSandbox.
+		params, scopes, err := r.validateParams(&run, &agent)
+		if err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidParams", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		// Validate gateway selection against Agent's available gateways.
+		if err := r.validateGateway(&run, &agent); err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
 		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
 		if err != nil {
 			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
@@ -627,21 +638,22 @@ func (r *AgentRunReconciler) createParamsConfigMap(
 	paramsKey := path.Base(ParamsFilePath) // params.json
 
 	cmName := run.Name + "-params"
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cmName,
-			Namespace: run.Namespace,
-			Labels: map[string]string{
-				labelManagedBy: managedByLabel,
-				labelAgentRun:  run.Name,
-			},
-		},
-		Data: map[string]string{paramsKey: string(content)},
-	}
-	if err := ctrl.SetControllerReference(run, cm, r.Scheme); err != nil {
-		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("setting ConfigMap owner reference: %w", err)
-	}
-	if err := r.Create(ctx, cm); err != nil && !errors.IsAlreadyExists(err) {
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      cmName,
+		Namespace: run.Namespace,
+	}}
+	// CreateOrUpdate rather than a bare Create: createSandbox can fail and
+	// retry, and the rendered content depends on the Agent's params and
+	// execution, so an AlreadyExists swallow could leave a stale params.json
+	// next to a freshly rendered prompt. Matches createInlineSkillConfigMaps.
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = map[string]string{
+			labelManagedBy: managedByLabel,
+			labelAgentRun:  run.Name,
+		}
+		cm.Data = map[string]string{paramsKey: string(content)}
+		return ctrl.SetControllerReference(run, cm, r.Scheme)
+	}); err != nil {
 		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("creating params ConfigMap: %w", err)
 	}
 
@@ -1188,8 +1200,8 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 
 			// Capture the harness's opaque termination data (usage/cost
 			// report). Stored verbatim, never interpreted (ADR 0018).
-			if term := agentContainerTermination(pod); term != nil && json.Valid([]byte(term.Message)) {
-				run.Status.TerminationData = &runtime.RawExtension{Raw: []byte(term.Message)}
+			if td := terminationDataFromPod(pod); td != nil {
+				run.Status.TerminationData = td
 			}
 
 			r.setTerminalOutcome(run, pod, cond.Reason)
@@ -1301,6 +1313,25 @@ func setRunSucceeded(
 		Reason:             reason,
 		Message:            message,
 	})
+}
+
+// terminationDataFromPod returns the agent container's termination message
+// as an opaque RawExtension for AgentRun.status.terminationData, but only
+// when it is a JSON object. The CRD types terminationData as an object, so
+// an array or scalar message would get the whole status patch (and
+// setTerminalOutcome with it) rejected; unmarshalling into a map succeeds
+// only for objects. Returns nil when there is no termination, the message
+// is empty, or it is not a JSON object.
+func terminationDataFromPod(pod *corev1.Pod) *runtime.RawExtension {
+	term := agentContainerTermination(pod)
+	if term == nil || term.Message == "" {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(term.Message), &obj) != nil {
+		return nil
+	}
+	return &runtime.RawExtension{Raw: []byte(term.Message)}
 }
 
 // agentContainerTermination returns the terminated state of the agent

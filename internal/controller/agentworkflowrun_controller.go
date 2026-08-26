@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"maps"
 
@@ -185,6 +186,26 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	if stageStatus.AgentRunName == "" {
 		agentRunName, err := r.createAgentRunForStage(ctx, &pbRun, stage, stageIndex, len(pbRun.Status.Stages))
 		if err != nil {
+			// A permanent config error (bad workflow param, unresolved
+			// $(workflow.<name>) in the guide) can never clear on retry —
+			// fail the run terminally, matching the AgentRun's
+			// InvalidParams. Everything else is transient: requeue.
+			var cfgErr *configError
+			if stderrors.As(err, &cfgErr) {
+				stageStatus.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				now := metav1.Now()
+				pbRun.Status.CompletionTime = &now
+				meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
+					Type:               ConditionTypeReady,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: pbRun.Generation,
+					Reason:             "InvalidParams",
+					Message:            fmt.Sprintf("Stage %q: %v", stage.Name, err),
+				})
+				return r.patchRunStatus(ctx, &pbRun, original)
+			}
+
 			logger.Error(err, "Failed to create AgentRun for stage",
 				"stage", stage.Name)
 			meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
@@ -233,11 +254,18 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// Mirror the AgentRun's phase onto the stage status.
+	// Mirror the AgentRun's phase onto the stage status for display.
 	stageStatus.Phase = agentRun.Status.Phase
 
-	switch agentRun.Status.Phase {
-	case konveyoriov1alpha1.AgentRunPhaseSucceeded:
+	// Sequence on the AgentRun's Succeeded condition, not phase (ADR 0018):
+	// True advances to the next stage, False (failure or limit reached)
+	// stops the workflow, Unknown/absent keeps waiting. This is the
+	// controller state machine reading Succeeded so phase can eventually
+	// be retired.
+	succeeded := meta.FindStatusCondition(agentRun.Status.Conditions,
+		konveyoriov1alpha1.AgentRunConditionSucceeded)
+	switch {
+	case succeeded != nil && succeeded.Status == metav1.ConditionTrue:
 		// Stage completed — the next reconcile will advance to the next stage.
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
@@ -248,8 +276,9 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 		return r.patchRunStatus(ctx, &pbRun, original)
 
-	case konveyoriov1alpha1.AgentRunPhaseFailed:
-		// Stage failed — fail the entire workflow run.
+	case succeeded != nil && succeeded.Status == metav1.ConditionFalse:
+		// Stage did not succeed (failure or limit reached) — fail the
+		// entire workflow run.
 		pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
 		now := metav1.Now()
 		pbRun.Status.CompletionTime = &now
@@ -258,12 +287,12 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: pbRun.Generation,
 			Reason:             "StageFailed",
-			Message:            fmt.Sprintf("Stage %q failed", stage.Name),
+			Message:            fmt.Sprintf("Stage %q did not succeed: %s", stage.Name, succeeded.Reason),
 		})
 		return r.patchRunStatus(ctx, &pbRun, original)
 
 	default:
-		// Stage is still running (Pending or Running).
+		// Stage is still running (Succeeded=Unknown or not yet set).
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
@@ -305,6 +334,17 @@ func stageAgentRunName(pbRunName, stageName string) string {
 //
 // Uses a deterministic name (<workflowrun>-<stage>) so that duplicate
 // creation on status-patch conflict is caught by AlreadyExists.
+// configError marks a permanent configuration error in a workflow run —
+// a bad workflow param value or an unresolved $(workflow.<name>) in the
+// guide. The declarations come from the frozen Status snapshot and the
+// supplied values from the immutable spec, so retrying cannot clear it;
+// the caller fails the run terminally (InvalidParams) rather than
+// requeuing forever, matching the AgentRun side.
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
 func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 	ctx context.Context,
 	pbRun *konveyoriov1alpha1.AgentWorkflowRun,
@@ -327,16 +367,24 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 	for _, p := range agent.Spec.Params {
 		declared[p.Name] = true
 	}
+	// Workflow-declared params (snapshotted at init, #87) are legitimate
+	// even when a stage's Agent does not declare them — they feed the
+	// workflow section of params.json and $(workflow.<name>) in the guide.
+	workflowDeclared := make(map[string]bool, len(pbRun.Status.Params))
+	for _, p := range pbRun.Status.Params {
+		workflowDeclared[p.Name] = true
+	}
 
-	// Filter workflow-run params to only those this stage's Agent declares.
-	// Params not declared by the stage Agent are silently dropped — log
-	// and emit an event so typos are debuggable.
+	// Pass only the stage Agent's declared params through to its AgentRun.
+	// A param declared by neither the stage Agent nor the workflow is a
+	// typo — log and emit an event so it is debuggable; a workflow-only
+	// param (used in the guide) is not skipped, it is consumed below.
 	var stageParams []konveyoriov1alpha1.ParamValue
 	var skipped []string
 	for _, p := range pbRun.Spec.Params {
 		if declared[p.Name] {
 			stageParams = append(stageParams, p)
-		} else {
+		} else if !workflowDeclared[p.Name] {
 			skipped = append(skipped, p.Name)
 		}
 	}
@@ -368,13 +416,18 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 	workflowRaw, workflowStrs, err := coerceWorkflowParams(
 		pbRun.Status.Params, suppliedValues(pbRun.Spec.Params))
 	if err != nil {
-		return "", fmt.Errorf("resolving workflow params: %w", err)
+		// Permanent: declarations are the frozen Status.Params snapshot and
+		// the supplied values are on the immutable spec, so retrying cannot
+		// clear it. Fail terminally, matching the AgentRun's InvalidParams.
+		return "", &configError{fmt.Errorf("resolving workflow params: %w", err)}
 	}
 
 	if pbRun.Status.Guide != "" {
 		guide, err := substitute(pbRun.Status.Guide, map[string]map[string]string{scopeWorkflow: workflowStrs})
 		if err != nil {
-			return "", fmt.Errorf("workflow guide: %w", err)
+			// Permanent: the guide is a frozen snapshot; an unresolved
+			// $(workflow.<name>) never clears on retry.
+			return "", &configError{fmt.Errorf("workflow guide: %w", err)}
 		}
 		env = append(env, corev1.EnvVar{
 			Name:  "KONVEYOR_WORKFLOW_GUIDE",

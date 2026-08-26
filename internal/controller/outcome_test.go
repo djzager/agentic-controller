@@ -28,7 +28,7 @@ import (
 
 // podWithExit builds a pod whose agent container has terminated with the
 // given exit code and termination message.
-func podWithExit(code int32) *corev1.Pod {
+func podWithExit(code int32, message string) *corev1.Pod {
 	return &corev1.Pod{
 		Status: corev1.PodStatus{
 			ContainerStatuses: []corev1.ContainerStatus{
@@ -37,7 +37,7 @@ func podWithExit(code int32) *corev1.Pod {
 					State: corev1.ContainerState{
 						Terminated: &corev1.ContainerStateTerminated{
 							ExitCode: code,
-							Message:  "",
+							Message:  message,
 						},
 					},
 				},
@@ -59,21 +59,21 @@ func TestSetTerminalOutcome(t *testing.T) {
 	}{
 		{
 			name:       "exit 0 is clean success",
-			pod:        podWithExit(0),
+			pod:        podWithExit(0, ""),
 			wantPhase:  konveyoriov1alpha1.AgentRunPhaseSucceeded,
 			wantStatus: metav1.ConditionTrue,
 			wantReason: konveyoriov1alpha1.AgentRunReasonSucceeded,
 		},
 		{
 			name:       "exit 1 is failure",
-			pod:        podWithExit(1),
+			pod:        podWithExit(1, ""),
 			wantPhase:  konveyoriov1alpha1.AgentRunPhaseFailed,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: konveyoriov1alpha1.AgentRunReasonFailed,
 		},
 		{
 			name:       "exit 2 is limit reached (remapped from failed pod)",
-			pod:        podWithExit(2),
+			pod:        podWithExit(2, ""),
 			wantPhase:  konveyoriov1alpha1.AgentRunPhaseFailed,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: konveyoriov1alpha1.AgentRunReasonLimitReached,
@@ -127,7 +127,7 @@ func TestAgentExitCode(t *testing.T) {
 	if _, ok := agentExitCode(nil); ok {
 		t.Errorf("nil pod should report no exit code")
 	}
-	if code, ok := agentExitCode(podWithExit(2)); !ok || code != 2 {
+	if code, ok := agentExitCode(podWithExit(2, "")); !ok || code != 2 {
 		t.Errorf("got (%d,%v), want (2,true)", code, ok)
 	}
 	// A pod whose agent container has not terminated yields no code.
@@ -136,5 +136,40 @@ func TestAgentExitCode(t *testing.T) {
 	}}}
 	if _, ok := agentExitCode(running); ok {
 		t.Errorf("running container should report no exit code")
+	}
+}
+
+func TestTerminationDataFromPod(t *testing.T) {
+	cases := []struct {
+		name    string
+		message string
+		wantSet bool
+	}{
+		{"json object is captured", `{"cost":{"amount":1.5},"turnsUsed":10}`, true},
+		{"json array is rejected (CRD wants an object)", `[1,2,3]`, false},
+		{"bare scalar is rejected", `42`, false},
+		{"bare string is rejected", `"done"`, false},
+		{"invalid json is rejected", `{not json`, false},
+		{"empty message yields nothing", ``, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			td := terminationDataFromPod(podWithExit(0, tc.message))
+			if tc.wantSet {
+				if td == nil {
+					t.Fatalf("expected terminationData to be set for %q", tc.message)
+				}
+				if string(td.Raw) != tc.message {
+					t.Errorf("terminationData = %q, want verbatim %q", td.Raw, tc.message)
+				}
+			} else if td != nil {
+				t.Errorf("expected no terminationData for %q, got %q", tc.message, td.Raw)
+			}
+		})
+	}
+
+	// No pod, or a pod whose agent container has not terminated, yields nothing.
+	if terminationDataFromPod(nil) != nil {
+		t.Errorf("nil pod should yield no terminationData")
 	}
 }
