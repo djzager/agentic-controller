@@ -106,3 +106,79 @@ func TestNormalizeProvider(t *testing.T) {
 		}
 	}
 }
+
+// TestGatewayVerificationProbeDiagnostic guards that the probe records a
+// diagnostic in the pod termination message and classifies the outcome so the
+// controller can surface the failure cause on the Gateway status.
+func TestGatewayVerificationProbeDiagnostic(t *testing.T) {
+	withAuth := gatewayVerificationCurlCommand(providerOpenAI, true)
+	for _, want := range []string{
+		"/dev/termination-log",
+		"ok code=$code",
+		"auth code=$code",
+		"http code=$code",
+		"unreachable rc=$rc",
+		"401|403)",
+	} {
+		if !strings.Contains(withAuth, want) {
+			t.Fatalf("expected %q in probe command %q", want, withAuth)
+		}
+	}
+
+	// A keyless probe sends no credential, so 401/403 must not be classified
+	// as an auth failure — otherwise we advise checking a key that isn't there.
+	keyless := gatewayVerificationCurlCommand(providerOpenAI, false)
+	for _, unwanted := range []string{"auth code=$code", "401|403)"} {
+		if strings.Contains(keyless, unwanted) {
+			t.Fatalf("keyless command must not classify auth failures, found %q in %q", unwanted, keyless)
+		}
+	}
+	// It still records reachability and generic HTTP outcomes.
+	for _, want := range []string{"ok code=$code", "http code=$code", "unreachable rc=$rc"} {
+		if !strings.Contains(keyless, want) {
+			t.Fatalf("expected %q in keyless probe command %q", want, keyless)
+		}
+	}
+}
+
+func TestGatewayVerifyReason(t *testing.T) {
+	const ep = "https://api.example.com"
+
+	tests := []struct {
+		name       string
+		diag       string
+		succeeded  bool
+		wantReason string
+		wantInMsg  string
+		notInMsg   string
+	}{
+		{"success with code", "ok code=200", true, reasonConnectionVerified, "HTTP 200", ""},
+		{"success no diag", "", true, reasonConnectionVerified, "is reachable", "HTTP"},
+		// A success verdict with a non-"ok" diagnostic must not quote the code,
+		// or we'd report "is reachable (HTTP 401)".
+		{"success mismatched diag", "auth code=401", true, reasonConnectionVerified, "is reachable", "HTTP"},
+		{"auth 401", "auth code=401", false, reasonAuthenticationFailed, "HTTP 401", ""},
+		{"auth 403", "auth code=403", false, reasonAuthenticationFailed, "API key", ""},
+		{"other non-2xx", "http code=500", false, reasonConnectionFailed, "HTTP 500", ""},
+		{"unreachable timeout", "unreachable rc=28", false, reasonEndpointUnreachable, "timed out", ""},
+		{"unreachable dns", "unreachable rc=6", false, reasonEndpointUnreachable, "resolve host", ""},
+		{"unreachable refused", "unreachable rc=7", false, reasonEndpointUnreachable, "refused", ""},
+		{"failure no diag", "", false, reasonConnectionFailed, "failed", ""},
+		{"unrecognized diag", "weird output", false, reasonConnectionFailed, "failed", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, msg := gatewayVerifyReason(tt.diag, ep, "gw-verify-x-gen1", tt.succeeded)
+			if reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", reason, tt.wantReason)
+			}
+			if !strings.Contains(msg, tt.wantInMsg) {
+				t.Errorf("message = %q, want to contain %q", msg, tt.wantInMsg)
+			}
+			if tt.notInMsg != "" && strings.Contains(msg, tt.notInMsg) {
+				t.Errorf("message = %q, want NOT to contain %q", msg, tt.notInMsg)
+			}
+		})
+	}
+}

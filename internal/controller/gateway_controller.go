@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -64,12 +65,38 @@ const (
 	providerXAI        = "xai"
 	providerGCPVertex  = "gcp_vertex_ai"
 	providerAWSBedrock = "aws_bedrock"
+
+	// verificationDeadline bounds one verification Job. The probe caps curl at
+	// 10s; the deadline covers image pull and, crucially, turns a pod that is
+	// never admitted (restricted Pod Security, an unpullable image) into a
+	// Failed Job instead of leaving the Gateway stuck on Verifying.
+	verificationDeadline = int64(120)
+
+	// verifyContainerName is the name of the verification Job's container,
+	// whose termination message carries the probe diagnostic.
+	verifyContainerName = "verify"
+
+	// Ready-condition reasons for connectivity verification outcomes.
+	reasonConnectionVerified   = "ConnectionVerified"
+	reasonConnectionFailed     = "ConnectionFailed"
+	reasonAuthenticationFailed = "AuthenticationFailed"
+	reasonEndpointUnreachable  = "EndpointUnreachable"
 )
 
 // GatewayReconciler reconciles a Gateway object.
 type GatewayReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// apiReader reads verification pods directly from the API server,
+	// bypassing the cache. Two reasons the cache can't serve this read: the
+	// manager's Pod cache is restricted to sandbox pods (see
+	// SandboxPodCacheOptions), so verification pods are never cached; and even
+	// if they were, the probe's termination message is written moments before
+	// its Job flips to Complete/Failed, so the cached pod could still lack the
+	// terminated container status. Set from mgr.GetAPIReader() in
+	// SetupWithManager.
+	apiReader client.Reader
 
 	// VerificationImage overrides the container image used for
 	// connectivity verification Jobs. Defaults to DefaultVerificationImage.
@@ -81,6 +108,7 @@ type GatewayReconciler struct {
 // +kubebuilder:rbac:groups=konveyor.io,resources=gateways/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;delete
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 
 // Reconcile handles Gateway reconciliation.
 //
@@ -125,7 +153,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Check the expected key exists in the Secret. A keyless credentialRef
 	// means the whole Secret is the credential (multi-variable, e.g. AWS
-	// SigV4) — then it just must not be empty.
+	// SigV4) - then it just must not be empty.
 	if gateway.Spec.CredentialRef.Key != "" {
 		if _, ok := secret.Data[gateway.Spec.CredentialRef.Key]; !ok {
 			gateway.Status.ConnectionVerified = false
@@ -157,7 +185,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	readyCond := meta.FindStatusCondition(gateway.Status.Conditions, ConditionTypeReady)
 	if readyCond != nil &&
 		readyCond.ObservedGeneration == gateway.Generation &&
-		(readyCond.Reason == "ConnectionVerified" || readyCond.Reason == "ConnectionFailed") {
+		isTerminalReadyReason(readyCond.Reason) {
 		return ctrl.Result{}, nil
 	}
 
@@ -190,7 +218,7 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	var job batchv1.Job
 	if err := r.Get(ctx, jobKey, &job); err != nil {
 		if errors.IsNotFound(err) {
-			// No verification Job exists — create one.
+			// No verification Job exists - create one.
 			if err := r.createVerificationJob(ctx, &gateway, jobName); err != nil {
 				logger.Error(err, "Failed to create verification Job")
 				return ctrl.Result{}, err
@@ -210,25 +238,27 @@ func (r *GatewayReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	// Step 3: Check the Job status.
 	if isJobComplete(&job) {
-		if isJobSucceeded(&job) {
-			gateway.Status.ConnectionVerified = true
-			meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionTrue,
-				ObservedGeneration: gateway.Generation,
-				Reason:             "ConnectionVerified",
-				Message:            fmt.Sprintf("Endpoint %s is reachable", gateway.Spec.Endpoint),
-			})
-		} else {
-			gateway.Status.ConnectionVerified = false
-			meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: gateway.Generation,
-				Reason:             "ConnectionFailed",
-				Message:            fmt.Sprintf("Verification Job %q failed", jobName),
-			})
+		succeeded := isJobSucceeded(&job)
+
+		// Read the probe's diagnostic from the pod's termination message
+		// before deleting the Job, so the failure cause (HTTP code or
+		// transport error) survives on status. Falls back to a generic
+		// message when no diagnostic is available.
+		diag := r.verificationDiagnostic(ctx, gateway.Namespace, jobName, job.UID)
+		reason, message := gatewayVerifyReason(diag, gateway.Spec.Endpoint, jobName, succeeded)
+
+		status := metav1.ConditionFalse
+		if succeeded {
+			status = metav1.ConditionTrue
 		}
+		gateway.Status.ConnectionVerified = succeeded
+		meta.SetStatusCondition(&gateway.Status.Conditions, metav1.Condition{
+			Type:               ConditionTypeReady,
+			Status:             status,
+			ObservedGeneration: gateway.Generation,
+			Reason:             reason,
+			Message:            message,
+		})
 
 		// Clean up the completed Job.
 		if err := r.Delete(ctx, &job, client.PropagationPolicy(metav1.DeletePropagationBackground)); client.IgnoreNotFound(err) != nil {
@@ -274,12 +304,42 @@ func normalizeProvider(provider string) string {
 // uses the OpenAI-compatible default (Authorization: Bearer against
 // /v1/models). When includeAuth is false the auth header is omitted so keyless
 // gateways are probed for reachability without an empty credential.
+//
+// The command captures curl's HTTP code and exit status and writes a compact
+// diagnostic to the pod's termination message (/dev/termination-log) so the
+// controller can surface the failure cause on the Gateway status:
+//   - "ok code=<n>"        a 2xx response (exit 0)
+//   - "auth code=<n>"      HTTP 401/403 - bad or missing credential
+//   - "http code=<n>"      any other non-2xx response
+//   - "unreachable rc=<n>" curl transport error (DNS, refused, timeout, ...)
+//
+// The endpoint and key stay in env vars ($LLM_ENDPOINT, $LLM_API_KEY) and are
+// never interpolated into the command string, keeping the probe injection-safe.
 func gatewayVerificationCurlCommand(provider string, includeAuth bool) string {
 	curl := "curl -sk --max-time 10 -o /dev/null -w '%{http_code}'"
 	if includeAuth {
 		curl += gatewayVerificationAuthHeader(provider)
 	}
-	return curl + ` "` + endpointModelsProbe + `" | grep -qE '` + verificationHTTPCodePattern + `'`
+	curl += ` "` + endpointModelsProbe + `"`
+
+	// Classify 401/403 as an authentication failure only when the probe
+	// actually sent a credential. A keyless credentialRef (empty key, e.g.
+	// AWS SigV4) sends no Authorization header, so a 401/403 there is just
+	// another non-2xx and must not tell the user to check an API key that
+	// isn't in the secret.
+	authArm := ""
+	if includeAuth {
+		authArm = `
+401|403) echo "auth code=$code" > /dev/termination-log ;;`
+	}
+
+	return "code=$(" + curl + `); rc=$?
+if [ "$rc" -ne 0 ]; then echo "unreachable rc=$rc" > /dev/termination-log; exit 1; fi
+if echo "$code" | grep -qE '` + verificationHTTPCodePattern + `'; then echo "ok code=$code" > /dev/termination-log; exit 0; fi
+case "$code" in` + authArm + `
+*) echo "http code=$code" > /dev/termination-log ;;
+esac
+exit 1`
 }
 
 // gatewayVerificationAuthHeader returns the provider-specific auth header
@@ -311,7 +371,7 @@ func (r *GatewayReconciler) createVerificationJob(
 	// The agent base image includes curl. Only 2xx counts as success so
 	// 401/403 (invalid or missing API key) fail verification instead of
 	// marking ConnectionVerified. Keyless credentialRef (empty key,
-	// e.g. AWS SigV4) omits the auth header entirely — an empty
+	// e.g. AWS SigV4) omits the auth header entirely - an empty
 	// credential would 401 under the ^2 check.
 	includeAuth := gateway.Spec.CredentialRef.Key != ""
 	if !knownProviders[normalizeProvider(gateway.Spec.Provider)] {
@@ -336,7 +396,6 @@ func (r *GatewayReconciler) createVerificationJob(
 		})
 	}
 
-	backoffLimit := int32(0)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      jobName,
@@ -348,15 +407,35 @@ func (r *GatewayReconciler) createVerificationJob(
 			},
 		},
 		Spec: batchv1.JobSpec{
-			BackoffLimit: &backoffLimit,
+			// One shot; a bad endpoint or credential will not fix itself on retry.
+			BackoffLimit: ptr.To(int32(0)),
+			// A pod that is never admitted (restricted Pod Security, an
+			// unpullable image) leaves the Job neither Complete nor Failed. The
+			// deadline turns that into a Failed Job so the Gateway does not sit
+			// on Verifying forever.
+			ActiveDeadlineSeconds: ptr.To(verificationDeadline),
 			Template: corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					RestartPolicy: corev1.RestartPolicyNever,
+					// Admissible under the restricted Pod Security Standards,
+					// matching the enumeration Job and the manager's own pod.
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsNonRoot:   ptr.To(true),
+						SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+					},
 					Containers: []corev1.Container{
 						{
-							Name:            "verify",
+							Name:            verifyContainerName,
 							Image:           image,
 							ImagePullPolicy: corev1.PullIfNotPresent,
+							// The probe only reads; it writes solely to
+							// /dev/null and /dev/termination-log, both on the
+							// writable /dev mount, so a read-only root is fine.
+							SecurityContext: &corev1.SecurityContext{
+								AllowPrivilegeEscalation: ptr.To(false),
+								ReadOnlyRootFilesystem:   ptr.To(true),
+								Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+							},
 							Command: []string{
 								"sh", "-c",
 								// Use env vars to avoid shell injection.
@@ -412,8 +491,131 @@ func isJobSucceeded(job *batchv1.Job) bool {
 	return false
 }
 
+// isTerminalReadyReason reports whether a Ready-condition reason represents a
+// settled verification outcome. The reconciler skips re-verifying a Gateway
+// whose current generation already reached one of these; a spec change (new
+// generation) re-triggers verification.
+func isTerminalReadyReason(reason string) bool {
+	switch reason {
+	case reasonConnectionVerified, reasonConnectionFailed, reasonAuthenticationFailed, reasonEndpointUnreachable:
+		return true
+	}
+	return false
+}
+
+// verificationDiagnostic returns the termination message written by the
+// verification Job's pod (see gatewayVerificationCurlCommand), or "" if no
+// terminated pod/message is found. It prefers the "verify" container and falls
+// back to any other terminated container carrying a message. Pods are pinned to
+// the Job by controller UID so a stray pod carrying the same job-name label
+// cannot win. Reads are uncached (see the apiReader field).
+func (r *GatewayReconciler) verificationDiagnostic(ctx context.Context, namespace, jobName string, jobUID types.UID) string {
+	var pods corev1.PodList
+	if err := r.apiReader.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			batchv1.JobNameLabel:       jobName,
+			batchv1.ControllerUidLabel: string(jobUID),
+		},
+	); err != nil {
+		// An RBAC gap or API error looks the same as "the probe wrote
+		// nothing" to the caller (both yield the generic terminal message), so
+		// surface it here rather than letting it vanish.
+		log.FromContext(ctx).Error(err, "Failed to list verification pods for diagnostic", "job", jobName)
+		return ""
+	}
+
+	var fallback string
+	for i := range pods.Items {
+		for _, cs := range pods.Items[i].Status.ContainerStatuses {
+			if cs.State.Terminated == nil {
+				continue
+			}
+			msg := strings.TrimSpace(cs.State.Terminated.Message)
+			if msg == "" {
+				continue
+			}
+			if cs.Name == verifyContainerName {
+				return msg
+			}
+			fallback = msg
+		}
+	}
+	return fallback
+}
+
+// gatewayVerifyReason maps a probe diagnostic line to a Ready-condition reason
+// and a human-readable message. succeeded is the Job's own Complete/Failed
+// outcome and takes precedence for the status; the diagnostic only enriches the
+// message and refines the failure reason. When diag is empty or unrecognized it
+// falls back to the historical generic messages.
+func gatewayVerifyReason(diag, endpoint, jobName string, succeeded bool) (reason, message string) {
+	fields := strings.Fields(diag)
+	code := diagValue(fields, "code")
+
+	if succeeded {
+		// Only quote the code when the probe reported success ("ok code=<n>");
+		// a mismatched or empty diagnostic must not produce "reachable (HTTP 401)".
+		if len(fields) > 0 && fields[0] == "ok" && code != "" {
+			return reasonConnectionVerified, fmt.Sprintf("Endpoint %s is reachable (HTTP %s)", endpoint, code)
+		}
+		return reasonConnectionVerified, fmt.Sprintf("Endpoint %s is reachable", endpoint)
+	}
+
+	if len(fields) > 0 {
+		switch fields[0] {
+		case "auth":
+			if code != "" {
+				return reasonAuthenticationFailed, fmt.Sprintf(
+					"Endpoint %s/v1/models returned HTTP %s - check the credential secret's API key",
+					endpoint, code)
+			}
+		case "http":
+			if code != "" {
+				return reasonConnectionFailed, fmt.Sprintf(
+					"Endpoint %s/v1/models returned HTTP %s", endpoint, code)
+			}
+		case "unreachable":
+			return reasonEndpointUnreachable, fmt.Sprintf(
+				"Endpoint %s is unreachable (%s)", endpoint, curlErrorPhrase(diagValue(fields, "rc")))
+		}
+	}
+
+	return reasonConnectionFailed, fmt.Sprintf("Verification Job %q failed", jobName)
+}
+
+// diagValue extracts the value of a "key=value" token from a diagnostic line's
+// fields, or "" if absent.
+func diagValue(fields []string, key string) string {
+	prefix := key + "="
+	for _, f := range fields {
+		if v, ok := strings.CutPrefix(f, prefix); ok {
+			return v
+		}
+	}
+	return ""
+}
+
+// curlErrorPhrase turns a curl exit code into a human-readable cause.
+func curlErrorPhrase(rc string) string {
+	switch rc {
+	case "6":
+		return "curl exit 6: could not resolve host"
+	case "7":
+		return "curl exit 7: connection refused"
+	case "28":
+		return "curl exit 28: timed out"
+	case "":
+		return "connection error"
+	default:
+		return "curl exit " + rc + ": transport error"
+	}
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *GatewayReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Uncached reader for verification pods; see the apiReader field.
+	r.apiReader = mgr.GetAPIReader()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&konveyoriov1alpha1.Gateway{}).
 		Owns(&batchv1.Job{}).
