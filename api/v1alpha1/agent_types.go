@@ -60,6 +60,33 @@ type AgentParam struct {
 	Required bool `json:"required,omitempty"`
 }
 
+// GitConfig customizes the git commit identity (user.name / user.email)
+// the harness sets before the agent commits. It controls commit
+// authorship only; push credentials are resolved separately from the
+// application's git identity and never leave the harness. Name and email
+// are one indivisible identity: both must be set (an empty gitConfig is
+// rejected), and an AgentRun's GitConfig replaces the Agent's whole
+// GitConfig rather than merging field by field. When gitConfig is omitted
+// entirely, commits use the harness default.
+// +kubebuilder:validation:XValidation:rule="has(self.userName) && has(self.userEmail)",message="userName and userEmail must both be set"
+type GitConfig struct {
+	// UserName maps to git config user.name for the agent's commits.
+	// go-git does not escape the identity, so reject angle brackets and
+	// control characters that would corrupt or forge the commit ident.
+	// +kubebuilder:validation:MaxLength=128
+	// +kubebuilder:validation:Pattern=`^[^\x00-\x1f\x7f<>]+$`
+	// +optional
+	UserName string `json:"userName,omitempty"`
+
+	// UserEmail maps to git config user.email for the agent's commits.
+	// Must be a bare address (local@domain) with no angle brackets,
+	// whitespace, or control characters — go-git wraps it in <> unescaped.
+	// +kubebuilder:validation:MaxLength=254
+	// +kubebuilder:validation:Pattern=`^[^\x00-\x20\x7f<>@]+@[^\x00-\x20\x7f<>@]+\.[^\x00-\x20\x7f<>@]+$`
+	// +optional
+	UserEmail string `json:"userEmail,omitempty"`
+}
+
 // AgentGatewayRef references a Gateway by name.
 type AgentGatewayRef struct {
 	// Ref is the name of a Gateway CR in the same namespace.
@@ -116,6 +143,12 @@ type AgentSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Params []AgentParam `json:"params,omitempty"`
+
+	// GitConfig sets the default git commit identity for the agent's
+	// commits. An AgentRun may override it per run. When unset, commits
+	// use the harness default identity.
+	// +optional
+	GitConfig *GitConfig `json:"gitConfig,omitempty"`
 }
 
 // AgentStatus defines the observed state of an Agent.

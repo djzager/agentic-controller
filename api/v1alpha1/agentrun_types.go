@@ -88,6 +88,13 @@ type AgentRunSpec struct {
 	// the Sandbox container. Passed through to the Sandbox unchanged.
 	// +optional
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// GitConfig overrides the Agent's git commit identity for this run.
+	// When set it replaces the Agent's GitConfig wholesale (name and email
+	// together); when unset the run uses the Agent's identity, then the
+	// harness default.
+	// +optional
+	GitConfig *GitConfig `json:"gitConfig,omitempty"`
 }
 
 // AgentRunStatus defines the observed state of an AgentRun.

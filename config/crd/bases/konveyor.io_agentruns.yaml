@@ -280,6 +280,33 @@ spec:
                   run. Must be one of the gateways declared on the referenced Agent.
                 minLength: 1
                 type: string
+              gitConfig:
+                description: |-
+                  GitConfig overrides the Agent's git commit identity for this run.
+                  When set it replaces the Agent's GitConfig wholesale (name and email
+                  together); when unset the run uses the Agent's identity, then the
+                  harness default.
+                properties:
+                  userEmail:
+                    description: |-
+                      UserEmail maps to git config user.email for the agent's commits.
+                      Must be a bare address (local@domain) with no angle brackets,
+                      whitespace, or control characters — go-git wraps it in <> unescaped.
+                    maxLength: 254
+                    pattern: ^[^\x00-\x20\x7f<>@]+@[^\x00-\x20\x7f<>@]+\.[^\x00-\x20\x7f<>@]+$
+                    type: string
+                  userName:
+                    description: |-
+                      UserName maps to git config user.name for the agent's commits.
+                      go-git does not escape the identity, so reject angle brackets and
+                      control characters that would corrupt or forge the commit ident.
+                    maxLength: 128
+                    pattern: ^[^\x00-\x1f\x7f<>]+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: userName and userEmail must both be set
+                  rule: has(self.userName) && has(self.userEmail)
               instructions:
                 description: |-
                   Instructions are task-specific instructions for this run.

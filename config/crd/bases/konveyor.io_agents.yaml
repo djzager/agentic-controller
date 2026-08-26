@@ -75,6 +75,32 @@ spec:
                 x-kubernetes-list-map-keys:
                 - ref
                 x-kubernetes-list-type: map
+              gitConfig:
+                description: |-
+                  GitConfig sets the default git commit identity for the agent's
+                  commits. An AgentRun may override it per run. When unset, commits
+                  use the harness default identity.
+                properties:
+                  userEmail:
+                    description: |-
+                      UserEmail maps to git config user.email for the agent's commits.
+                      Must be a bare address (local@domain) with no angle brackets,
+                      whitespace, or control characters — go-git wraps it in <> unescaped.
+                    maxLength: 254
+                    pattern: ^[^\x00-\x20\x7f<>@]+@[^\x00-\x20\x7f<>@]+\.[^\x00-\x20\x7f<>@]+$
+                    type: string
+                  userName:
+                    description: |-
+                      UserName maps to git config user.name for the agent's commits.
+                      go-git does not escape the identity, so reject angle brackets and
+                      control characters that would corrupt or forge the commit ident.
+                    maxLength: 128
+                    pattern: ^[^\x00-\x1f\x7f<>]+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: userName and userEmail must both be set
+                  rule: has(self.userName) && has(self.userEmail)
               image:
                 description: Image is the container image carrying the agent runtime
                   and toolchains.

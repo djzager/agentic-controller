@@ -288,6 +288,80 @@ var _ = Describe("CRD Validation", func() {
 			Expect(err).To(HaveOccurred())
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
+
+		// agentWithGitConfig builds an otherwise-valid Agent carrying the
+		// given gitConfig, so the git-identity cases below isolate the
+		// GitConfig validation.
+		agentWithGitConfig := func(name string, gc *konveyoriov1alpha1.GitConfig) *konveyoriov1alpha1.Agent {
+			return &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testImageGoose,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
+						{Ref: testGatewayName},
+					},
+					GitConfig: gc,
+				},
+			}
+		}
+
+		It("should accept an Agent with a complete gitConfig", func() {
+			agent := agentWithGitConfig("agent-gitconfig-valid-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent, UserEmail: gitEmailAgent})
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+
+		It("should reject an empty gitConfig", func() {
+			agent := agentWithGitConfig("agent-gitconfig-empty-test",
+				&konveyoriov1alpha1.GitConfig{})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a gitConfig with only userName set", func() {
+			agent := agentWithGitConfig("agent-gitconfig-name-only-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a gitConfig with only userEmail set", func() {
+			agent := agentWithGitConfig("agent-gitconfig-email-only-test",
+				&konveyoriov1alpha1.GitConfig{UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a userName containing ident metacharacters", func() {
+			agent := agentWithGitConfig("agent-gitconfig-bad-name-test",
+				&konveyoriov1alpha1.GitConfig{UserName: "Evil <a@b.com>", UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a userName containing a newline", func() {
+			agent := agentWithGitConfig("agent-gitconfig-newline-name-test",
+				&konveyoriov1alpha1.GitConfig{UserName: "Coolstore\nBot", UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a malformed userEmail", func() {
+			agent := agentWithGitConfig("agent-gitconfig-bad-email-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent, UserEmail: "not-an-email"})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
 	})
 
 	// ── AgentRun ───────────────────────────────────────────────────────
