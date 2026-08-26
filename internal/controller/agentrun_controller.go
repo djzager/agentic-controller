@@ -110,6 +110,10 @@ const (
 	// SkillCard imposes on what they carry.
 	skillSourcesEnv = "KONVEYOR_SKILL_SOURCES"
 
+	// sandboxConditionFinished is the Sandbox condition type that reports the
+	// run has reached a terminal state (Succeeded or Failed).
+	sandboxConditionFinished = "Finished"
+
 	// sandboxFinishedReasonSucceeded is the Sandbox condition reason for
 	// success. Must match Agent Sandbox's SandboxReasonPodSucceeded constant.
 	sandboxFinishedReasonSucceeded = "PodSucceeded"
@@ -128,6 +132,15 @@ type AgentRunReconciler struct {
 	// harness binary and the source list written here is always read by a
 	// loader of the same version.
 	SkillLoaderImage string
+
+	// apiReader reads directly from the API server, bypassing the manager
+	// cache. It is used only for the best-effort pod termination-message
+	// lookup: a direct read avoids surfacing a stale generic message when
+	// the label-restricted Pod cache (see SandboxPodCacheOptions) lags the
+	// Sandbox "Finished" condition. The cache-backed client still serves the
+	// phase=Running read, so the controller keeps watching sandbox pods. Set
+	// by SetupWithManager.
+	apiReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=konveyor.io,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -283,7 +296,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Update AgentRun phase and ACP readiness from the Sandbox and its pod.
-	r.updatePhaseFromSandbox(&run, &sandbox, pod)
+	r.updatePhaseFromSandbox(ctx, &run, &sandbox, pod)
 
 	return r.patchRunStatus(ctx, &run, original)
 }
@@ -529,6 +542,12 @@ func (r *AgentRunReconciler) createSandbox(
 								},
 								PeriodSeconds: acpProbePeriodSeconds,
 							},
+							// The harness writes a machine-readable failure
+							// payload to the default termination-log path; the
+							// controller lifts it onto AgentRunStatus. Fall back
+							// to the last log lines if the harness dies before
+							// writing (#143).
+							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
 						},
 					},
 					Volumes: volumes,
@@ -1013,13 +1032,14 @@ func skillLoaderContainer(image string, sources *skillSources, mounts []corev1.V
 // the Sandbox Ready condition — and is reported as the ACPReady condition,
 // so a client dials on ACPReady=True, never on Phase.
 func (r *AgentRunReconciler) updatePhaseFromSandbox(
+	ctx context.Context,
 	run *konveyoriov1alpha1.AgentRun,
 	sandbox *sandboxv1beta1.Sandbox,
 	pod *corev1.Pod,
 ) {
 	// Check Sandbox conditions for Finished state.
 	for _, cond := range sandbox.Status.Conditions {
-		if cond.Type == "Finished" && cond.Status == metav1.ConditionTrue {
+		if cond.Type == sandboxConditionFinished && cond.Status == metav1.ConditionTrue {
 			now := metav1.Now()
 			run.Status.CompletionTime = &now
 			if run.Status.StartTime == nil {
@@ -1050,12 +1070,20 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 				})
 			} else {
 				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				// Prefer the harness's human-readable failure message from the
+				// pod termination log so the reason is visible on the AgentRun's
+				// Ready condition (e.g. a non-git source; #143). Fall back to
+				// the generic Sandbox reason when no message is available.
+				message := fmt.Sprintf("Sandbox finished with reason: %s", cond.Reason)
+				if msg := r.lookupTerminationMessage(ctx, run); msg != "" {
+					message = msg
+				}
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 					Type:               ConditionTypeReady,
 					Status:             metav1.ConditionFalse,
 					ObservedGeneration: run.Generation,
 					Reason:             "Failed",
-					Message:            fmt.Sprintf("Sandbox finished with reason: %s", cond.Reason),
+					Message:            message,
 				})
 			}
 			return
@@ -1131,6 +1159,43 @@ func podStartTime(pod *corev1.Pod, fallback metav1.Time) metav1.Time {
 	return fallback
 }
 
+// lookupTerminationMessage lists the run's pods and returns the agent
+// container's terminated-state message, or "" if none is available. Errors
+// listing pods are swallowed — the termination payload is best-effort detail
+// and must never block the phase update.
+func (r *AgentRunReconciler) lookupTerminationMessage(
+	ctx context.Context,
+	run *konveyoriov1alpha1.AgentRun,
+) string {
+	var pods corev1.PodList
+	if err := r.apiReader.List(ctx, &pods,
+		client.InNamespace(run.Namespace),
+		client.MatchingLabels{labelAgentRun: run.Name},
+	); err != nil {
+		log.FromContext(ctx).V(1).Info("listing pods for termination message failed",
+			"agentRun", run.Name, "error", err)
+		return ""
+	}
+	return podTerminationMessage(pods.Items)
+}
+
+// podTerminationMessage returns the "agent" container's terminated-state
+// message across the given pods, or "" if no such terminated container is
+// found. It is a pure function to keep the extraction logic unit-testable.
+func podTerminationMessage(pods []corev1.Pod) string {
+	for i := range pods {
+		for _, cs := range pods[i].Status.ContainerStatuses {
+			if cs.Name != agentContainerName {
+				continue
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.Message != "" {
+				return cs.State.Terminated.Message
+			}
+		}
+	}
+	return ""
+}
+
 // patchRunStatus patches the AgentRun status.
 func (r *AgentRunReconciler) patchRunStatus(
 	ctx context.Context,
@@ -1156,6 +1221,10 @@ func generateSecretKey() (string, error) {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Direct API reader for the best-effort pod termination-message lookup,
+	// so we don't start a cluster-wide Pod informer via the manager cache.
+	r.apiReader = mgr.GetAPIReader()
+
 	// Index AgentRuns by agentRef for efficient reverse lookup when
 	// an Agent changes.
 	if err := mgr.GetFieldIndexer().IndexField(

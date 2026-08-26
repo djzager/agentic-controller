@@ -26,6 +26,7 @@ import (
 
 	"github.com/konveyor/migration-harness/internal/prompt"
 	"github.com/konveyor/migration-harness/internal/tee"
+	"github.com/konveyor/migration-harness/internal/termination"
 	"github.com/konveyor/migration-harness/internal/watcher"
 )
 
@@ -68,6 +69,9 @@ func init() {
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
+		// Surface the failure message on the pod termination log so the reason
+		// reaches the AgentRun's Ready condition, not solely the logs (#143).
+		_ = termination.Write(err.Error())
 		os.Exit(1)
 	}
 }
@@ -560,6 +564,14 @@ func resolveFromHub(cfg *config.Config, hubClient *hub.Client) (*git.Credentials
 	}
 	if app.Repository == nil {
 		return nil, fmt.Errorf("application %q has no source repository configured", app.Name)
+	}
+
+	// Fail fast on non-git sources instead of attempting the clone and
+	// failing later with a confusing go-git error (issue #143). Runs before
+	// the log line below so a bad source is rejected cleanly rather than
+	// surfacing later as a deep go-git clone error.
+	if err := hub.ValidateSourceRepository(app.Repository); err != nil {
+		return nil, err
 	}
 	logging.Ok("app: %s (id=%d), repo: %s", app.Name, app.ID, app.Repository.URL)
 
