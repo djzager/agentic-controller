@@ -124,6 +124,10 @@ const (
 	// run has reached a terminal state (Succeeded or Failed).
 	sandboxConditionFinished = "Finished"
 
+	// paramsVolumeName is the name of the ConfigMap volume carrying
+	// /run/konveyor/params.json (ADR 0009).
+	paramsVolumeName = "konveyor-params"
+
 	// sandboxFinishedReasonSucceeded is the Sandbox condition reason for
 	// success. Must match Agent Sandbox's SandboxReasonPodSucceeded constant.
 	sandboxFinishedReasonSucceeded = "PodSucceeded"
@@ -188,75 +192,64 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 
+	// Shed the legacy Ready condition on any live run created before it was
+	// removed from AgentRun (ADR 0018); the terminal outcome now lives on
+	// Succeeded, serving on ACPReady. Runs clean up on their next reconcile.
+	meta.RemoveStatusCondition(&run.Status.Conditions, ConditionTypeReady)
+
 	// Look up the referenced Agent.
 	var agent konveyoriov1alpha1.Agent
 	agentKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.AgentRef}
 	if err := r.Get(ctx, agentKey, &agent); err != nil {
 		if errors.IsNotFound(err) {
 			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "AgentNotFound",
-				Message:            fmt.Sprintf("Agent %q not found", run.Spec.AgentRef),
-			})
+			setRunSucceeded(&run, metav1.ConditionFalse, "AgentNotFound",
+				fmt.Sprintf("Agent %q not found", run.Spec.AgentRef))
 			return r.patchRunStatus(ctx, &run, original)
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Check that the Agent is Ready before proceeding.
+	// Check that the Agent is Ready before proceeding. The run is not
+	// failed — it waits — so Succeeded stays Unknown.
 	agentReady := meta.FindStatusCondition(agent.Status.Conditions, ConditionTypeReady)
 	if agentReady == nil || agentReady.Status != metav1.ConditionTrue {
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "AgentNotReady",
-			Message:            fmt.Sprintf("Agent %q is not Ready", run.Spec.AgentRef),
-		})
+		setRunSucceeded(&run, metav1.ConditionUnknown, "AgentNotReady",
+			fmt.Sprintf("Agent %q is not Ready", run.Spec.AgentRef))
 		return r.patchRunStatus(ctx, &run, original)
 	}
 
-	// Validate params against Agent declarations.
-	if err := r.validateParams(&run, &agent); err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "InvalidParams",
-			Message:            err.Error(),
-		})
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// Validate gateway selection against Agent's available gateways.
-	if err := r.validateGateway(&run, &agent); err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "InvalidGateway",
-			Message:            err.Error(),
-		})
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// If no Sandbox exists yet, create one.
+	// If no Sandbox exists yet, validate config against the Agent and
+	// create it. Validation runs only here, not on every reconcile of a
+	// live run: the Sandbox bakes in the rendered prompt/params at
+	// creation, so re-validating a running run against a since-edited
+	// Agent would change nothing except to spuriously fail it. (Immunity
+	// of not-yet-created workflow stages to Agent edits is tracked
+	// separately in #180.)
 	if run.Status.SandboxName == "" {
-		sandboxName, err := r.createSandbox(ctx, &run, &agent)
+		// Validate params against Agent declarations; the resolved params
+		// and substitution scopes feed createSandbox.
+		params, scopes, err := r.validateParams(&run, &agent)
+		if err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidParams", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		// Validate gateway selection against Agent's available gateways.
+		if err := r.validateGateway(&run, &agent); err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
 		if err != nil {
 			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "SandboxCreationFailed",
-				Message:            fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err),
-			})
+			// Transient — the reconcile requeues with backoff — so the
+			// run is not yet failed; Succeeded stays Unknown.
+			setRunSucceeded(&run, metav1.ConditionUnknown, "SandboxCreationFailed",
+				fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err))
 			// Patch status then return the error so controller-runtime
 			// requeues with exponential backoff.
 			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {
@@ -266,13 +259,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		run.Status.SandboxName = sandboxName
 		run.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "SandboxCreated",
-			Message:            fmt.Sprintf("Sandbox %q created", sandboxName),
-		})
+		setRunSucceeded(&run, metav1.ConditionUnknown, "SandboxCreated",
+			fmt.Sprintf("Sandbox %q created", sandboxName))
 		return r.patchRunStatus(ctx, &run, original)
 	}
 
@@ -282,13 +270,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, sandboxKey, &sandbox); err != nil {
 		if errors.IsNotFound(err) {
 			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "SandboxNotFound",
-				Message:            fmt.Sprintf("Sandbox %q was deleted", run.Status.SandboxName),
-			})
+			setRunSucceeded(&run, metav1.ConditionFalse, "SandboxNotFound",
+				fmt.Sprintf("Sandbox %q was deleted", run.Status.SandboxName))
 			return r.patchRunStatus(ctx, &run, original)
 		}
 		return ctrl.Result{}, err
@@ -311,13 +294,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	return r.patchRunStatus(ctx, &run, original)
 }
 
-// validateParams checks that supplied params match Agent declarations.
+// validateParams checks that supplied params match Agent declarations
+// and returns the resolved params.json content and substitution scopes
+// for createSandbox to reuse.
 func (r *AgentRunReconciler) validateParams(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
-) error {
+) (paramsFile, map[string]map[string]string, error) {
 	// Build a map of declared params.
-	declared := make(map[string]konveyoriov1alpha1.AgentParam)
+	declared := make(map[string]konveyoriov1alpha1.Param)
 	for _, p := range agent.Spec.Params {
 		declared[p.Name] = p
 	}
@@ -325,7 +310,7 @@ func (r *AgentRunReconciler) validateParams(
 	// Check that all supplied params are declared.
 	for _, p := range run.Spec.Params {
 		if _, ok := declared[p.Name]; !ok {
-			return fmt.Errorf("param %q is not declared by Agent %q", p.Name, agent.Name)
+			return paramsFile{}, nil, fmt.Errorf("param %q is not declared by Agent %q", p.Name, agent.Name)
 		}
 	}
 
@@ -336,11 +321,47 @@ func (r *AgentRunReconciler) validateParams(
 	}
 	for _, p := range agent.Spec.Params {
 		if p.Required && p.Default == "" && !supplied[p.Name] {
-			return fmt.Errorf("required param %q not supplied", p.Name)
+			return paramsFile{}, nil, fmt.Errorf("required param %q not supplied", p.Name)
 		}
 	}
 
-	return nil
+	// Resolve params (type coercion) and validate prompt/instruction
+	// substitution up front. These are permanent config errors (a
+	// non-numeric value for a number param, a reference to an undeclared
+	// param), so surfacing them here fails the run terminally with
+	// InvalidParams rather than requeuing forever as
+	// SandboxCreationFailed. The resolved params and scopes are returned
+	// so createSandbox reuses them instead of recomputing.
+	params, scopes, err := buildParams(run, agent)
+	if err != nil {
+		return paramsFile{}, nil, err
+	}
+	if _, _, err := renderPromptAndInstructions(agent, run, scopes); err != nil {
+		return paramsFile{}, nil, err
+	}
+
+	return params, scopes, nil
+}
+
+// renderPromptAndInstructions substitutes $(scope.name) references in the
+// Agent prompt and the AgentRun instructions. It is the single place both
+// the up-front validation and the env-var construction resolve these two
+// fields, so a reference that passes validation renders identically at
+// sandbox creation.
+func renderPromptAndInstructions(
+	agent *konveyoriov1alpha1.Agent,
+	run *konveyoriov1alpha1.AgentRun,
+	scopes map[string]map[string]string,
+) (prompt, instructions string, err error) {
+	prompt, err = substitute(agent.Spec.Prompt, scopes)
+	if err != nil {
+		return "", "", fmt.Errorf("prompt: %w", err)
+	}
+	instructions, err = substitute(run.Spec.Instructions, scopes)
+	if err != nil {
+		return "", "", fmt.Errorf("instructions: %w", err)
+	}
+	return prompt, instructions, nil
 }
 
 // validateGateway checks that the selected gateway is in the Agent's
@@ -381,6 +402,8 @@ func (r *AgentRunReconciler) createSandbox(
 	ctx context.Context,
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
+	params paramsFile,
+	scopes map[string]map[string]string,
 ) (string, error) {
 	sandboxName := run.Name
 
@@ -415,10 +438,22 @@ func (r *AgentRunReconciler) createSandbox(
 	// Update the run status with the secret ref.
 	run.Status.SecretKeyRef = &corev1.LocalObjectReference{Name: secretName}
 
-	// Build env vars: KONVEYOR_PARAM_* from params + ACP secret key + LLM credentials.
-	env, envFrom, err := r.buildEnvVars(ctx, run, agent, secretName)
+	// params and scopes were resolved and validated by validateParams
+	// (ADR 0009/0018) and passed in, so a coercion or unresolved-reference
+	// failure has already aborted the run terminally before this point.
+
+	// Build env vars: ACP secret key + LLM credentials + substituted
+	// prompt/instructions. Params ride params.json, not env.
+	env, envFrom, err := r.buildEnvVars(ctx, run, agent, secretName, scopes)
 	if err != nil {
 		return "", fmt.Errorf("building env vars: %w", err)
+	}
+
+	// Create the params.json ConfigMap and mount it at
+	// /run/konveyor/params.json.
+	paramsVolume, paramsMount, err := r.createParamsConfigMap(ctx, run, params)
+	if err != nil {
+		return "", fmt.Errorf("creating params ConfigMap: %w", err)
 	}
 
 	// Stage skill sources. Images become ImageVolumes, inline content becomes a
@@ -452,12 +487,16 @@ func (r *AgentRunReconciler) createSandbox(
 	skillsMount := corev1.VolumeMount{Name: skillsVolumeName, MountPath: skillsDir}
 	loaderMounts = append(loaderMounts, skillsMount)
 
-	volumeMounts := make([]corev1.VolumeMount, 0, 3) // skills, workspace, tmp
+	volumeMounts := make([]corev1.VolumeMount, 0, 4) // skills, params, workspace, tmp
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      skillsVolumeName,
 		MountPath: skillsDir,
 		ReadOnly:  true,
 	})
+
+	// params.json is mounted into the agent container only, not the loader.
+	volumes = append(volumes, paramsVolume)
+	volumeMounts = append(volumeMounts, paramsMount)
 
 	// Add workspace EmptyDir.
 	volumes = append(volumes, corev1.Volume{
@@ -578,6 +617,65 @@ func (r *AgentRunReconciler) createSandbox(
 	return sandboxName, nil
 }
 
+// createParamsConfigMap renders params.json, creates (or leaves in
+// place) a ConfigMap owned by the run, and returns the Volume and
+// VolumeMount that surface it at /run/konveyor/params.json in the
+// Sandbox. The ConfigMap is named <run>-params and is a non-secret
+// vehicle (credentials ride the gateway envFrom path, not params.json).
+func (r *AgentRunReconciler) createParamsConfigMap(
+	ctx context.Context,
+	run *konveyoriov1alpha1.AgentRun,
+	params paramsFile,
+) (corev1.Volume, corev1.VolumeMount, error) {
+	content, err := renderParamsFile(params)
+	if err != nil {
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("rendering params.json: %w", err)
+	}
+
+	// Derive the mount directory and ConfigMap key from the single
+	// contract constant so the two cannot drift (ADR 0009).
+	paramsDir := path.Dir(ParamsFilePath)  // /run/konveyor
+	paramsKey := path.Base(ParamsFilePath) // params.json
+
+	cmName := run.Name + "-params"
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      cmName,
+		Namespace: run.Namespace,
+	}}
+	// CreateOrUpdate rather than a bare Create: createSandbox can fail and
+	// retry, and the rendered content depends on the Agent's params and
+	// execution, so an AlreadyExists swallow could leave a stale params.json
+	// next to a freshly rendered prompt. Matches createInlineSkillConfigMaps.
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = map[string]string{
+			labelManagedBy: managedByLabel,
+			labelAgentRun:  run.Name,
+		}
+		cm.Data = map[string]string{paramsKey: string(content)}
+		return ctrl.SetControllerReference(run, cm, r.Scheme)
+	}); err != nil {
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("creating params ConfigMap: %w", err)
+	}
+
+	volume := corev1.Volume{
+		Name: paramsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cmName},
+				Items: []corev1.KeyToPath{
+					{Key: paramsKey, Path: paramsKey},
+				},
+			},
+		},
+	}
+	mount := corev1.VolumeMount{
+		Name:      paramsVolumeName,
+		MountPath: paramsDir,
+		ReadOnly:  true,
+	}
+	return volume, mount, nil
+}
+
 // buildEnvVars constructs the env var list for the Sandbox container, plus
 // envFrom sources for the gateway's credential Secret when it is exposed
 // whole (credentialRef without a key, e.g. AWS SigV4).
@@ -586,28 +684,15 @@ func (r *AgentRunReconciler) buildEnvVars(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
 	acpSecretName string,
+	scopes map[string]map[string]string,
 ) ([]corev1.EnvVar, []corev1.EnvFromSource, error) {
 	var env []corev1.EnvVar
 	var envFrom []corev1.EnvFromSource
 
-	// Build KONVEYOR_PARAM_* env vars from params (supplied values
-	// override defaults from the Agent).
-	supplied := make(map[string]string)
-	for _, p := range run.Spec.Params {
-		supplied[p.Name] = p.Value
-	}
-	for _, p := range agent.Spec.Params {
-		value, ok := supplied[p.Name]
-		if !ok {
-			value = p.Default
-		}
-		if value != "" {
-			env = append(env, corev1.EnvVar{
-				Name:  "KONVEYOR_PARAM_" + strings.ToUpper(p.Name),
-				Value: value,
-			})
-		}
-	}
+	// Parameters are no longer injected as KONVEYOR_PARAM_* env vars.
+	// They are delivered in /run/konveyor/params.json (ADR 0009) and
+	// referenced in prompt text via $(agent.<name>) / $(workflow.<name>),
+	// substituted by the controller below.
 
 	// ACP secret key. The harness maps this to the runtime-specific
 	// env var (e.g. GOOSE_SERVER__SECRET_KEY for Goose).
@@ -621,19 +706,23 @@ func (r *AgentRunReconciler) buildEnvVars(
 		},
 	})
 
-	// Instructions (if any).
+	// Prompt and instructions, with $(scope.name) substitution. Resolved
+	// through the same helper the up-front validation uses so the two
+	// paths cannot diverge.
+	prompt, instructions, err := renderPromptAndInstructions(agent, run, scopes)
+	if err != nil {
+		return nil, nil, err
+	}
 	if run.Spec.Instructions != "" {
 		env = append(env, corev1.EnvVar{
 			Name:  "KONVEYOR_INSTRUCTIONS",
-			Value: run.Spec.Instructions,
+			Value: instructions,
 		})
 	}
-
-	// Agent prompt.
 	if agent.Spec.Prompt != "" {
 		env = append(env, corev1.EnvVar{
 			Name:  "KONVEYOR_PROMPT",
-			Value: agent.Spec.Prompt,
+			Value: prompt,
 		})
 	}
 
@@ -1109,33 +1198,16 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 				Message:            "The run has finished; its ACP endpoint is gone",
 			})
 
-			if cond.Reason == sandboxFinishedReasonSucceeded {
-				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
-				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:               ConditionTypeReady,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: run.Generation,
-					Reason:             sandboxFinishedReasonSucceeded,
-					Message:            "Agent run completed successfully",
-				})
-			} else {
-				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-				// Prefer the harness's human-readable failure message from the
-				// pod termination log so the reason is visible on the AgentRun's
-				// Ready condition (e.g. a non-git source; #143). Fall back to
-				// the generic Sandbox reason when no message is available.
-				message := fmt.Sprintf("Sandbox finished with reason: %s", cond.Reason)
-				if msg := r.lookupTerminationMessage(ctx, run); msg != "" {
-					message = msg
-				}
-				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:               ConditionTypeReady,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: run.Generation,
-					Reason:             "Failed",
-					Message:            message,
-				})
+			// Capture the harness's opaque termination data (usage/cost
+			// report). Stored verbatim, never interpreted (ADR 0018).
+			if td := terminationDataFromPod(pod); td != nil {
+				run.Status.TerminationData = td
 			}
+
+			// The harness may also write a human-readable failure message to
+			// the termination log (e.g. a non-git source, #143); surface it
+			// on the failure outcome, preferring it over the generic reason.
+			r.setTerminalOutcome(run, pod, cond.Reason, r.lookupTerminationMessage(ctx, run))
 			return
 		}
 	}
@@ -1172,25 +1244,130 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 		if pod != nil {
 			podPhase = string(pod.Status.Phase)
 		}
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "PodNotRunning",
-			Message:            fmt.Sprintf("Waiting for sandbox pod %q to run (%s)", sandbox.Name, podPhase),
-		})
+		setRunSucceeded(run, metav1.ConditionUnknown, "PodNotRunning",
+			fmt.Sprintf("Waiting for sandbox pod %q to run (%s)", sandbox.Name, podPhase))
 		return
 	}
 	run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseRunning
 	start := podStartTime(pod, sandbox.CreationTimestamp)
 	run.Status.StartTime = &start
+	setRunSucceeded(run, metav1.ConditionUnknown, konveyoriov1alpha1.AgentRunReasonRunning,
+		"Agent is running")
+}
+
+// Harness exit-code contract (ADR 0011/0018). Additional codes may be
+// added later; any non-zero code stops a workflow.
+const (
+	harnessExitSucceeded    = 0
+	harnessExitLimitReached = 2
+)
+
+// setTerminalOutcome sets the AgentRun's terminal phase and the
+// Succeeded condition from the harness exit code (ADR 0018), falling
+// back to the Sandbox's coarse Finished reason when the pod's container
+// exit code is unavailable.
+//
+// Note the exit-2 remap: a limit-reached run exits non-zero, so the pod
+// is Failed and the Sandbox reports a non-PodSucceeded reason — the
+// controller must read the container exit code to tell "stopped on
+// budget" (Succeeded=False, LimitReached) from a genuine error
+// (Succeeded=False, Failed). Only exit 0 is a clean success.
+//
+// failureMessage, when non-empty, is the harness's human-readable
+// termination message (e.g. a non-git source, #143); it is preferred over
+// the generic reason on a failure outcome.
+func (r *AgentRunReconciler) setTerminalOutcome(
+	run *konveyoriov1alpha1.AgentRun,
+	pod *corev1.Pod,
+	sandboxReason string,
+	failureMessage string,
+) {
+	exitCode, haveExit := agentExitCode(pod)
+
+	switch {
+	case haveExit && exitCode == harnessExitLimitReached:
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+		setRunSucceeded(run, metav1.ConditionFalse, konveyoriov1alpha1.AgentRunReasonLimitReached,
+			"Execution limit reached; the agent committed a handoff")
+	case (haveExit && exitCode == harnessExitSucceeded) ||
+		(!haveExit && sandboxReason == sandboxFinishedReasonSucceeded):
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
+		setRunSucceeded(run, metav1.ConditionTrue, konveyoriov1alpha1.AgentRunReasonSucceeded,
+			"Agent run completed successfully")
+	default:
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+		message := fmt.Sprintf("Sandbox finished with reason: %s", sandboxReason)
+		if haveExit {
+			message = fmt.Sprintf("Agent exited with code %d", exitCode)
+		}
+		// Prefer the harness's human-readable failure message when present.
+		if failureMessage != "" {
+			message = failureMessage
+		}
+		setRunSucceeded(run, metav1.ConditionFalse, konveyoriov1alpha1.AgentRunReasonFailed, message)
+	}
+}
+
+// setRunSucceeded sets the AgentRun's Succeeded condition — the single
+// terminal-outcome signal (ADR 0018). Unknown while the run is still in
+// progress, True/False once it ends. AgentRun carries no Ready condition;
+// every progress and outcome state rides Succeeded (serving is the
+// separate ACPReady condition).
+func setRunSucceeded(
+	run *konveyoriov1alpha1.AgentRun,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
+		Type:               konveyoriov1alpha1.AgentRunConditionSucceeded,
+		Status:             status,
 		ObservedGeneration: run.Generation,
-		Reason:             "Running",
-		Message:            "Agent is running",
+		Reason:             reason,
+		Message:            message,
 	})
+}
+
+// terminationDataFromPod returns the agent container's termination message
+// as an opaque RawExtension for AgentRun.status.terminationData, but only
+// when it is a JSON object. The CRD types terminationData as an object, so
+// an array or scalar message would get the whole status patch (and
+// setTerminalOutcome with it) rejected; unmarshalling into a map succeeds
+// only for objects. Returns nil when there is no termination, the message
+// is empty, or it is not a JSON object.
+func terminationDataFromPod(pod *corev1.Pod) *runtime.RawExtension {
+	term := agentContainerTermination(pod)
+	if term == nil || term.Message == "" {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(term.Message), &obj) != nil {
+		return nil
+	}
+	return &runtime.RawExtension{Raw: []byte(term.Message)}
+}
+
+// agentContainerTermination returns the terminated state of the agent
+// container, or nil if the pod is absent or the container has not
+// terminated.
+func agentContainerTermination(pod *corev1.Pod) *corev1.ContainerStateTerminated {
+	if pod == nil {
+		return nil
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == agentContainerName && cs.State.Terminated != nil {
+			return cs.State.Terminated
+		}
+	}
+	return nil
+}
+
+// agentExitCode returns the agent container's exit code and whether it
+// was available.
+func agentExitCode(pod *corev1.Pod) (int32, bool) {
+	if term := agentContainerTermination(pod); term != nil {
+		return term.ExitCode, true
+	}
+	return 0, false
 }
 
 // podStartTime is when the agent container started running, else when the
