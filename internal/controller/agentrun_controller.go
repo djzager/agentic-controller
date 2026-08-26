@@ -1204,7 +1204,10 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 				run.Status.TerminationData = td
 			}
 
-			r.setTerminalOutcome(run, pod, cond.Reason)
+			// The harness may also write a human-readable failure message to
+			// the termination log (e.g. a non-git source, #143); surface it
+			// on the failure outcome, preferring it over the generic reason.
+			r.setTerminalOutcome(run, pod, cond.Reason, r.lookupTerminationMessage(ctx, run))
 			return
 		}
 	}
@@ -1269,10 +1272,15 @@ const (
 // controller must read the container exit code to tell "stopped on
 // budget" (Succeeded=False, LimitReached) from a genuine error
 // (Succeeded=False, Failed). Only exit 0 is a clean success.
+//
+// failureMessage, when non-empty, is the harness's human-readable
+// termination message (e.g. a non-git source, #143); it is preferred over
+// the generic reason on a failure outcome.
 func (r *AgentRunReconciler) setTerminalOutcome(
 	run *konveyoriov1alpha1.AgentRun,
 	pod *corev1.Pod,
 	sandboxReason string,
+	failureMessage string,
 ) {
 	exitCode, haveExit := agentExitCode(pod)
 
@@ -1291,6 +1299,10 @@ func (r *AgentRunReconciler) setTerminalOutcome(
 		message := fmt.Sprintf("Sandbox finished with reason: %s", sandboxReason)
 		if haveExit {
 			message = fmt.Sprintf("Agent exited with code %d", exitCode)
+		}
+		// Prefer the harness's human-readable failure message when present.
+		if failureMessage != "" {
+			message = failureMessage
 		}
 		setRunSucceeded(run, metav1.ConditionFalse, konveyoriov1alpha1.AgentRunReasonFailed, message)
 	}

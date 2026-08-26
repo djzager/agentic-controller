@@ -107,7 +107,7 @@ func TestBuildEnvVarsGitIdentity(t *testing.T) {
 		run := &konveyoriov1alpha1.AgentRun{}
 		run.Spec.GitConfig = gitCfg(gitNameRun, gitEmailRun)
 
-		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret")
+		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret", nil)
 		if err != nil {
 			t.Fatalf("buildEnvVars: %v", err)
 		}
@@ -126,7 +126,7 @@ func TestBuildEnvVarsGitIdentity(t *testing.T) {
 		agent := &konveyoriov1alpha1.Agent{}
 		run := &konveyoriov1alpha1.AgentRun{}
 
-		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret")
+		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret", nil)
 		if err != nil {
 			t.Fatalf("buildEnvVars: %v", err)
 		}
@@ -153,7 +153,7 @@ func TestBuildEnvVarsGitIdentity(t *testing.T) {
 			}},
 		}
 
-		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret")
+		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret", nil)
 		if err != nil {
 			t.Fatalf("buildEnvVars: %v", err)
 		}
@@ -176,7 +176,7 @@ func TestBuildEnvVarsGitIdentity(t *testing.T) {
 			{Name: "SOME_OTHER_VAR", Value: "keep-me"},
 		}
 
-		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret")
+		env, _, err := r.buildEnvVars(context.Background(), run, agent, "acp-secret", nil)
 		if err != nil {
 			t.Fatalf("buildEnvVars: %v", err)
 		}

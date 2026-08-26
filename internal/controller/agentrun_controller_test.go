@@ -482,7 +482,7 @@ var _ = Describe("AgentRun Controller", func() {
 			secretName = "ar-secret-term"
 		)
 
-		It("should surface the pod termination message on the Ready condition", func() {
+		It("should surface the pod termination message on the Succeeded condition", func() {
 			cleanup := makeReadyGateway(gwName, secretName)
 			defer cleanup()
 
@@ -544,14 +544,15 @@ var _ = Describe("AgentRun Controller", func() {
 			})
 			Expect(k8sClient.Status().Update(ctx, &sandbox)).To(Succeed())
 
-			By("verifying the termination message is surfaced on the Ready condition")
+			By("verifying the termination message is surfaced on the Succeeded condition")
 			Eventually(func(g Gomega) {
 				g.Expect(k8sClient.Get(ctx, runKey, &fetchedRun)).To(Succeed())
 				g.Expect(fetchedRun.Status.Phase).To(Equal(konveyoriov1alpha1.AgentRunPhaseFailed))
-				readyCond := meta.FindStatusCondition(fetchedRun.Status.Conditions, ConditionTypeReady)
-				g.Expect(readyCond).NotTo(BeNil())
-				g.Expect(readyCond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(readyCond.Message).To(Equal(terminationMsg))
+				cond := meta.FindStatusCondition(fetchedRun.Status.Conditions, konveyoriov1alpha1.AgentRunConditionSucceeded)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal(konveyoriov1alpha1.AgentRunReasonFailed))
+				g.Expect(cond.Message).To(Equal(terminationMsg))
 			}, timeout, interval).Should(Succeed())
 
 			Expect(k8sClient.Delete(ctx, pod)).To(Succeed())

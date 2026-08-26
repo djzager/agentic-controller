@@ -50,12 +50,14 @@ func TestSetTerminalOutcome(t *testing.T) {
 	r := &AgentRunReconciler{}
 
 	cases := []struct {
-		name          string
-		pod           *corev1.Pod
-		sandboxReason string
-		wantPhase     konveyoriov1alpha1.AgentRunPhase
-		wantStatus    metav1.ConditionStatus
-		wantReason    string
+		name           string
+		pod            *corev1.Pod
+		sandboxReason  string
+		failureMessage string
+		wantPhase      konveyoriov1alpha1.AgentRunPhase
+		wantStatus     metav1.ConditionStatus
+		wantReason     string
+		wantMessage    string
 	}{
 		{
 			name:       "exit 0 is clean success",
@@ -70,6 +72,15 @@ func TestSetTerminalOutcome(t *testing.T) {
 			wantPhase:  konveyoriov1alpha1.AgentRunPhaseFailed,
 			wantStatus: metav1.ConditionFalse,
 			wantReason: konveyoriov1alpha1.AgentRunReasonFailed,
+		},
+		{
+			name:           "failure prefers the harness termination message (#143)",
+			pod:            podWithExit(1, ""),
+			failureMessage: "source is not a git repository",
+			wantPhase:      konveyoriov1alpha1.AgentRunPhaseFailed,
+			wantStatus:     metav1.ConditionFalse,
+			wantReason:     konveyoriov1alpha1.AgentRunReasonFailed,
+			wantMessage:    "source is not a git repository",
 		},
 		{
 			name:       "exit 2 is limit reached (remapped from failed pod)",
@@ -99,7 +110,7 @@ func TestSetTerminalOutcome(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			run := &konveyoriov1alpha1.AgentRun{}
-			r.setTerminalOutcome(run, tc.pod, tc.sandboxReason)
+			r.setTerminalOutcome(run, tc.pod, tc.sandboxReason, tc.failureMessage)
 
 			if run.Status.Phase != tc.wantPhase {
 				t.Errorf("phase = %q, want %q", run.Status.Phase, tc.wantPhase)
@@ -113,6 +124,9 @@ func TestSetTerminalOutcome(t *testing.T) {
 			}
 			if succeeded.Reason != tc.wantReason {
 				t.Errorf("Succeeded.Reason = %q, want %q", succeeded.Reason, tc.wantReason)
+			}
+			if tc.wantMessage != "" && succeeded.Message != tc.wantMessage {
+				t.Errorf("Succeeded.Message = %q, want %q", succeeded.Message, tc.wantMessage)
 			}
 			// AgentRun carries no Ready condition (ADR 0018) — the
 			// terminal outcome lives only on Succeeded.
