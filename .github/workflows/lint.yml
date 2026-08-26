@@ -95,5 +95,11 @@ jobs:
       # Offline check (no GitHub API, no token): every third-party Action and
       # reusable workflow must be pinned to a full commit SHA. Run
       # `make update-actions` locally to refresh pins.
+      #
+      # GOTOOLCHAIN=auto lets `go install` fetch the newer Go toolchain pinact
+      # requires; setup-go pins GOTOOLCHAIN=local to the project's go.mod
+      # version (older than pinact needs), which would otherwise fail the build.
       - name: Verify Actions are SHA-pinned
         run: make verify-actions
+        env:
+          GOTOOLCHAIN: auto
