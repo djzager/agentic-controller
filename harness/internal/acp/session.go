@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/konveyor/migration-harness/internal/logging"
 )
@@ -18,6 +19,14 @@ type SessionClient struct {
 
 	fwdMu     sync.Mutex
 	forwarder PermissionForwarder
+
+	// sessionID is the run session, stored so an unanswered HITL question
+	// can cancel the turn from the agent-request goroutine. Written once in
+	// CreateSession (before any prompt), read on elicitation timeout.
+	sessionID atomic.Value // string
+	// hitlUnanswered latches when an ask_user question went unanswered, so
+	// runStage fails the run instead of letting the model guess past it.
+	hitlUnanswered atomic.Bool
 }
 
 // NewSessionClient creates a session client from an existing WebSocket
@@ -46,11 +55,14 @@ const (
 	ForwardTimeout
 )
 
-// PermissionForwarder relays a session/request_permission ask to attached
-// human viewers (the ACP tee). Implementations must be safe for concurrent
-// use and must not block past their own timeout.
+// PermissionForwarder relays the asks goose raises toward the client —
+// session/request_permission (tool approval) and elicitation/create (a
+// question from the agent, e.g. the ask_user tool) — to attached human
+// viewers (the ACP tee). Implementations must be safe for concurrent use
+// and must not block past their own timeout.
 type PermissionForwarder interface {
 	ForwardPermission(params json.RawMessage) (json.RawMessage, PermissionForwardOutcome)
+	ForwardElicitation(params json.RawMessage) (json.RawMessage, PermissionForwardOutcome)
 }
 
 // SetPermissionForwarder installs the viewer relay consulted before the
@@ -78,7 +90,11 @@ type InitParams struct {
 }
 
 type ClientCapabilities struct {
-	Meta map[string]any `json:"_meta,omitempty"`
+	// Elicitation advertises form-mode elicitation support: goose then
+	// relays an MCP server's elicitation/create (the harness's own
+	// ask_user tool) to us instead of cancelling it on the agent's behalf.
+	Elicitation map[string]any `json:"elicitation,omitempty"`
+	Meta        map[string]any `json:"_meta,omitempty"`
 }
 
 type ClientInfo struct {
@@ -109,7 +125,11 @@ func (c *SessionClient) Initialize(ctx context.Context) (*InitResult, error) {
 		// customNotifications turns on goose's `_goose/unstable/session/update`
 		// stream: usage_update (live token/context spend) and status_message
 		// (notices + progress). The tee forwards both to attached viewers.
+		// elicitation.form makes goose route an agent's question
+		// (elicitation/create) to the harness, which offers it to viewers
+		// like a permission ask — and fails closed (cancel) with nobody there.
 		ClientCapabilities: ClientCapabilities{
+			Elicitation: map[string]any{"form": map[string]any{}},
 			Meta: map[string]any{
 				"goose": map[string]any{"customNotifications": true},
 			},
@@ -135,11 +155,38 @@ type SessionNewParams struct {
 	MCPServers []MCPServer `json:"mcpServers"`
 }
 
-// MCPServer describes an MCP tool server for a session.
+// MCPServer describes a stdio MCP tool server for a session (ACP
+// McpServerStdio: name, command, args, env as a LIST of name/value pairs —
+// a map is rejected by goose's untagged-enum parse with -32602).
 type MCPServer struct {
-	Command string            `json:"command"`
-	Args    []string          `json:"args"`
-	Env     map[string]string `json:"env,omitempty"`
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	Env     []EnvVar `json:"env"`
+}
+
+// EnvVar is one environment variable handed to an MCP server.
+type EnvVar struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// MarshalJSON keeps args and env present-and-array on the wire even when
+// nil: goose's untagged-enum parse of mcpServers is only proven against
+// that exact shape, and a nil slice would marshal as null — risking the
+// same -32602 the name/value list exists to avoid. Whether an absent
+// field matches the stdio variant is equally unproven, so nil normalizes
+// to [] rather than relying on omitempty.
+func (m MCPServer) MarshalJSON() ([]byte, error) {
+	type mcpServerNoMethods MCPServer
+	w := mcpServerNoMethods(m)
+	if w.Args == nil {
+		w.Args = []string{}
+	}
+	if w.Env == nil {
+		w.Env = []EnvVar{}
+	}
+	return json.Marshal(w)
 }
 
 // SessionNewResult is the response from session/new.
@@ -186,12 +233,39 @@ func (c *SessionClient) CreateSession(ctx context.Context, cwd string, mcpServer
 		return "", fmt.Errorf("session/new: no session ID received")
 	}
 
+	c.sessionID.Store(sessionID)
+
 	preview := sessionID
 	if len(preview) > 8 {
 		preview = preview[:8] + "..."
 	}
 	logging.Ok("ACP session created: %s", preview)
 	return sessionID, nil
+}
+
+// HITLGateUnanswered reports whether the run raised an ask_user question
+// that no human answered. The harness treats that as a terminal failure:
+// the agent explicitly asked for a decision it could not make alone, so a
+// run that proceeds anyway is exactly the fail-open the gate exists to
+// prevent. Read by runStage once the prompt returns.
+func (c *SessionClient) HITLGateUnanswered() bool {
+	return c.hitlUnanswered.Load()
+}
+
+// cancelTurn stops the active run turn. Fired after an unanswered
+// elicitation is cancelled: goose parks the turn on the elicitation reply
+// with no timeout of its own and session/cancel cannot unpark it — the
+// cancel action is the only key — so this must run only after the cancel
+// response has been sent, when the turn is running again and can be
+// stopped before the model steamrolls a guess.
+func (c *SessionClient) cancelTurn() {
+	sid, _ := c.sessionID.Load().(string)
+	if sid == "" {
+		return
+	}
+	if err := c.ws.Notify("session/cancel", map[string]any{"sessionId": sid}); err != nil {
+		logging.Warn("cancel turn after unanswered HITL question: %v", err)
+	}
 }
 
 // ContentBlock is a content item in a prompt.
@@ -407,6 +481,11 @@ type PermissionOption struct {
 func (c *SessionClient) answerAgentRequest(msg *RPCResponse) {
 	id := msg.ID
 
+	if msg.Method == "elicitation/create" {
+		c.answerElicitation(msg)
+		return
+	}
+
 	if msg.Method != "session/request_permission" {
 		logging.Warn("agent request %q unsupported — rejecting (method not found)", msg.Method)
 		if err := c.ws.SendResponse(id, nil, &RPCError{Code: -32601, Message: "method not supported by harness"}); err != nil {
@@ -464,6 +543,56 @@ func (c *SessionClient) answerAgentRequest(msg *RPCResponse) {
 	if err := c.ws.SendResponse(id, map[string]any{"outcome": outcome}, nil); err != nil {
 		logging.Warn("reply to permission request: %v", err)
 	}
+}
+
+// answerElicitation handles the agent asking the human a question
+// (elicitation/create — from the harness's ask_user tool, the only
+// elicitation source, mounted only when HITL asking is enabled). Offered to
+// attached viewers first; a human's answer rides back verbatim. With nobody
+// there, or nobody answering in time, the ask is a HITL gate the agent
+// explicitly opened and cannot clear alone: the harness cancels the ask AND
+// fails the run — it stops the turn (fail closed) rather than let the model
+// read "nobody answered" and steamroll a guess. Never answered on the
+// human's behalf.
+func (c *SessionClient) answerElicitation(msg *RPCResponse) {
+	id := msg.ID
+	var params struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(msg.Params, &params)
+	title := params.Message
+	// Truncate on rune boundaries: byte slicing a non-ASCII message would
+	// split a UTF-8 sequence mid-rune.
+	if r := []rune(title); len(r) > 80 {
+		title = string(r[:77]) + "..."
+	}
+
+	if f := c.permissionForwarder(); f != nil {
+		result, outcome := f.ForwardElicitation(msg.Params)
+		switch outcome {
+		case ForwardAnswered:
+			logging.Info("question %q answered by attached viewer", title)
+			if err := c.ws.SendResponse(id, result, nil); err != nil {
+				logging.Warn("relay elicitation answer: %v", err)
+			}
+			return
+		case ForwardTimeout:
+			logging.Warn("question %q unanswered by viewer — cancelling and failing the run (HITL gate)", title)
+		case ForwardNoViewers:
+			logging.Warn("question %q — no viewer to answer, cancelling and failing the run (HITL gate)", title)
+		}
+	} else {
+		logging.Warn("agent asked %q — no HITL relay, cancelling and failing the run", title)
+	}
+
+	// Latch the failure before unparking goose, then send the cancel action
+	// (the only thing that unparks the turn) and stop the now-running turn
+	// so the model cannot proceed on an unanswered gate.
+	c.hitlUnanswered.Store(true)
+	if err := c.ws.SendResponse(id, map[string]any{"action": "cancel"}, nil); err != nil {
+		logging.Warn("reply to elicitation: %v", err)
+	}
+	c.cancelTurn()
 }
 
 func extractSessionIDFromNotifications(notifications []*RPCResponse) string {

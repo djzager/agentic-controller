@@ -17,6 +17,7 @@ import (
 
 	"github.com/konveyor/agentic-controller/api/skill"
 	"github.com/konveyor/migration-harness/internal/acp"
+	"github.com/konveyor/migration-harness/internal/askuser"
 	"github.com/konveyor/migration-harness/internal/config"
 	"github.com/konveyor/migration-harness/internal/git"
 	"github.com/konveyor/migration-harness/internal/goose"
@@ -39,8 +40,30 @@ var runCmd = &cobra.Command{
 	RunE:  runStage,
 }
 
+// askUserCmd is the stdio MCP server goose spawns for the ask_user tool
+// (listed in session/new mcpServers by runStage). It never loads the
+// harness config — it only speaks MCP on stdin/stdout.
+var askUserCmd = &cobra.Command{
+	Use:    askuser.Subcommand,
+	Short:  "Serve the ask_user MCP tool over stdio (started by goose, not by hand)",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		srv := askuser.New(os.Stdout, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		})
+		err := srv.Serve(ctx, os.Stdin)
+		if err == context.Canceled {
+			return nil
+		}
+		return err
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(askUserCmd)
 }
 
 func main() {
@@ -242,9 +265,29 @@ func runStage(cmd *cobra.Command, args []string) error {
 	defer wsClient.Close()
 
 	session := acp.NewSessionClient(wsClient)
-	sessionID, err := session.CreateSession(ctx, cloneDir, nil)
+	// ask_user: the harness binary doubles as a stdio MCP server giving the
+	// agent one tool whose questions reach attached viewers (through the
+	// tee) and block the turn until answered — the in-turn "stop and
+	// confirm" the transcript otherwise cannot express.
+	var mcpServers []acp.MCPServer
+	if cfg.HITLAsk {
+		if self, err := os.Executable(); err == nil {
+			mcpServers = append(mcpServers, acp.MCPServer{
+				Name:    askuser.ToolName,
+				Command: self,
+				Args:    []string{askuser.Subcommand},
+				Env:     []acp.EnvVar{},
+			})
+		} else {
+			logging.Warn("ask_user tool disabled: cannot resolve harness executable: %v", err)
+		}
+	}
+	sessionID, err := session.CreateSession(ctx, cloneDir, mcpServers)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
+	}
+	if len(mcpServers) > 0 {
+		logging.Ok("ask_user tool mounted (questions reach attached viewers; HARNESS_HITL_ASK=off to disable)")
 	}
 
 	// 6b. Expose the run: tee listener on the pod ACP port. Viewers get
@@ -328,6 +371,7 @@ func runStage(cmd *cobra.Command, args []string) error {
 		Rules:         rules,
 		WorkflowGuide: cfg.WorkflowGuide,
 		StageTask:     cfg.StageInstructions,
+		AskUser:       len(mcpServers) > 0,
 	})
 
 	// 8. Start filesystem watcher BEFORE blocking prompt
@@ -360,10 +404,18 @@ func runStage(cmd *cobra.Command, args []string) error {
 		teeSrv.SetRunActive(false)
 	}
 
+	// An unanswered ask_user question is a HITL gate the harness stopped the
+	// turn on: it also surfaces as stopReason=cancelled (the harness fired
+	// session/cancel), so check it before the viewer-cancel case and give it
+	// its own message rather than blaming a viewer.
+	hitlUnanswered := session.HITLGateUnanswered()
 	// A viewer's session/cancel surfaces as a clean stop with
 	// stopReason=cancelled — a deliberate human abort, not a success.
 	cancelled := err == nil && promptResult != nil && promptResult.StopReason == "cancelled"
-	if cancelled {
+	switch {
+	case hitlUnanswered:
+		logging.Err("run stopped: an ask_user question went unanswered (HITL gate, fail-closed)")
+	case cancelled:
 		logging.Warn("run cancelled by an attached viewer")
 	}
 	if err != nil {
@@ -390,7 +442,7 @@ func runStage(cmd *cobra.Command, args []string) error {
 	w.Stop()
 
 	// 13. Determine exit status from ACP/goose signals
-	stageFailed := err != nil || !srv.Alive() || cancelled
+	stageFailed := err != nil || !srv.Alive() || cancelled || hitlUnanswered
 
 	// 14. Final push (use a fresh context — the signal context may
 	// already be cancelled after SIGINT)
@@ -410,6 +462,10 @@ func runStage(cmd *cobra.Command, args []string) error {
 	// notices must not claim work landed on the branch.
 	if stageFailed {
 		switch {
+		case hitlUnanswered && pushed:
+			emitNotice("run stopped — an ask_user question went unanswered (no human to decide); partial work pushed to branch %s", creds.Branch)
+		case hitlUnanswered:
+			emitNotice("run stopped — an ask_user question went unanswered (no human to decide); no commits to push")
 		case cancelled && pushed:
 			emitNotice("run cancelled by viewer — partial work pushed to branch %s", creds.Branch)
 		case cancelled:
@@ -418,6 +474,10 @@ func runStage(cmd *cobra.Command, args []string) error {
 			emitNotice("stage failed — partial work pushed to branch %s", creds.Branch)
 		default:
 			emitNotice("stage failed — no commits to push")
+		}
+		if hitlUnanswered {
+			logging.Err("stage failed: ask_user question unanswered (HITL gate)")
+			return fmt.Errorf("stage failed: ask_user question unanswered (HITL gate)")
 		}
 		logging.Err("stage failed")
 		return fmt.Errorf("stage failed")
