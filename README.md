@@ -59,7 +59,15 @@ agentic-controller/
   cmd/skill-loader/       The init container and enumeration Job binary
   docs/adr/               Architecture Decision Records
   harness/                In-pod runner: git lifecycle, prompt assembly, ACP
-  skills/                 Agent skills, both runtime and contributor-facing
+  skills/                 Agent Skills directories:
+    plan, execute,          shipped in the bundle image built by
+    verify,                 skills/Containerfile; a SkillCard selects
+    javaee-to-quarkus         one of them via subPath
+    grill-me,               contributor skills for developing ON this
+    grill-with-docs,        repo — deliberately not in the bundle image
+    submit-pr
+    examples/               SkillCard fixtures (not shipped)
+    Containerfile           builds the skill bundle image
   CONTEXT.md              Domain glossary
   AGENTS.md               Agent-facing instructions
 ```

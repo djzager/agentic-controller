@@ -40,36 +40,54 @@ repos overwrites the multi-arch manifest with a single-arch image. Use it
 only for scratch/dev registries; for quay, use the multi-arch targets
 below.
 
-Both `controller` and `agentic-controller-agent` (built by the
-`controller`/`controller-agent` jobs in `images.yml`) remain amd64-only —
-"multi-arch" here covers the agent-base + language image hierarchy, not
-end-to-end Sandbox clusters running on arm64.
+The `controller` and skill bundle images are amd64-only, as is
+`agentic-controller-agent` — the agentic stack targets amd64 Sandbox
+clusters, so "multi-arch" here covers only the agent-base + language image
+hierarchy.
 
-### Multi-arch builds
+### Publishing (versioned)
 
-In CI, all five images (agent-base + the four language images) build for
-`linux/amd64` and `linux/arm64` via
-[konveyor/release-tools](https://github.com/konveyor/release-tools)
-shared `build-push-images.yaml` reusable workflow: each arch builds
-natively on its own runner and pushes under an arch-suffixed tag, then a
-final job assembles those into a manifest list under the real tag.
-agent-base publishes first so the language images' `FROM
-quay.io/konveyor/agent-base` resolves against an already-published,
-genuinely multi-arch manifest.
+Publishing lives in `image-build-push.yml`, a dedicated workflow with no
+`paths:` filter. This is separate from `images.yml` because GitHub gates
+`push` events on both `tags:`/`branches:` and `paths:` — tag pushes would
+not reliably fire under a `paths:` filter. The workflow triggers on pushes
+to `main`, `release-*` branches, and `v*` tags, and publishes every shipped
+operand image via
+[konveyor/release-tools](https://github.com/konveyor/release-tools)'
+shared `build-push-images.yaml` reusable workflow:
 
-Publishing lives in `image-build-push.yml`, a dedicated workflow
-with no `paths:` filter. This is separate from `images.yml` because
-GitHub gates `push` events on both `tags:`/`branches:` and `paths:` — tag
-pushes would not reliably fire under a `paths:` filter. The workflow
-triggers on pushes to `main`, `release-*` branches, and `v*` tags:
+- **`agentic-controller`** — the controller (amd64).
+- **`agent-base` + the four language images** — multi-arch (`linux/amd64`
+  and `linux/arm64`): each arch builds natively on its own runner and pushes
+  under an arch-suffixed tag, then a final job assembles those into a
+  manifest list under the real tag. agent-base publishes first so the
+  language images' `FROM quay.io/konveyor/agent-base` resolves against an
+  already-published, genuinely multi-arch manifest.
+- **`skills`** — the skill bundle (amd64), built from `catalog/` (build
+  context `catalog/`, `catalog/Containerfile`), gated on `make skill-validate`
+  so an unusable skill never ships. Everything under `catalog/skills/` ships;
+  the worked examples in `catalog/examples/` and the repo's maintainer
+  workflow skills in `skills/` are outside that context and never ship
+  (see ADR 0017).
+
+The tag is derived from the ref by the reusable workflow:
 
 - **`main`** pushes tag images as `:latest`.
 - **`v*`** tag pushes tag images with the version (e.g. `:v0.11.0`) —
-  the reusable workflow derives the tag from `github.ref_name`.
+  derived from `github.ref_name`.
 - **`release-*`** branch pushes tag images with the branch name.
 
-`images.yml` keeps the `paths:`-filtered PR artifact builds and the
-controller/controller-agent build+push jobs.
+We publish tags only; the operator converts a tag to a `@sha256` digest at
+bundle time.
+
+`images.yml` keeps the `paths:`-filtered PR artifact builds, a PR-time
+controller build check, and the `controller-agent` build+push.
+`skills.yml` keeps the PR-time skill validate + build check.
+
+### Multi-arch (agent images)
+
+The agent-base + language images build for `linux/amd64` and `linux/arm64`
+as described above.
 
 For local testing without pushing to CI, the same two platforms can be
 built with podman directly (Linux hosts need `qemu-user-static` installed

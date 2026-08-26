@@ -47,7 +47,7 @@ SKILL_IMAGE="quay.io/konveyor/skills"
 SKILL_DIRS=(plan execute verify javaee-to-quarkus)
 
 for SKILL in "${SKILL_DIRS[@]}"; do
-    SKILL_PATH="$REPO_ROOT/skills/$SKILL"
+    SKILL_PATH="$REPO_ROOT/catalog/skills/$SKILL"
     if [ ! -d "$SKILL_PATH" ]; then
         echo "  WARN: skill dir $SKILL_PATH not found, skipping"
         continue

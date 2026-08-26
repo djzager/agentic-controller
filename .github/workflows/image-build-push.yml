@@ -1,10 +1,22 @@
-name: Build and Push Agent Images (Multi-Arch)
+name: Build and Push Images (Versioned)
 
-# Dedicated workflow for publishing multi-arch agent images. Kept separate
-# from images.yml (which carries a paths: filter for PR and dev builds)
-# because GitHub gates push events on BOTH tags:/branches: AND paths: —
-# tag pushes would not reliably fire under a paths: filter. This is the
-# same split tackle2-hub and tackle2-ui use.
+# Dedicated workflow for publishing the shipped operand images: the
+# controller, the agent-base + language image hierarchy, and the skill
+# bundle. Kept separate from images.yml (which carries a paths: filter for
+# PR and dev builds) because GitHub gates push events on BOTH
+# tags:/branches: AND paths: — tag pushes would not reliably fire under a
+# paths: filter. This is the same split tackle2-hub and tackle2-ui use.
+#
+# The tag is derived from the ref by the reusable workflow:
+#   main         -> :latest
+#   release-0.11 -> :release-0.11
+#   v0.11.0 tag  -> :v0.11.0
+# We publish tags only; the operator converts a tag to a @sha256 digest at
+# bundle time.
+#
+# The controller and skill-bundle images are amd64-only: the agentic stack
+# targets amd64 Sandbox clusters (see images/README.md). agent-base and the
+# language images are multi-arch (amd64 + arm64).
 
 on:
   push:
@@ -22,6 +34,21 @@ concurrency:
 permissions: {}
 
 jobs:
+  controller:
+    permissions:
+      contents: read
+    name: Build and push controller
+    uses: konveyor/release-tools/.github/workflows/build-push-images.yaml@4cf4ec7e8a15336b88c3e5ba2ee126f4082f53f2 # main
+    with:
+      registry: "quay.io/konveyor"
+      image_name: agentic-controller
+      containerfile: Dockerfile
+      context: "."
+      architectures: '["amd64"]'
+    secrets:
+      registry_username: ${{ vars.QUAY_USERNAME }}
+      registry_password: ${{ secrets.QUAY_PASSWORD }}
+
   agent-base:
     permissions:
       contents: read
@@ -63,6 +90,44 @@ jobs:
       architectures: '["amd64", "arm64"]'
       extra-args: |
         --build-arg BASE_IMAGE=quay.io/konveyor/agent-base:${{ github.ref == 'refs/heads/main' && 'latest' || github.ref_name }}
+    secrets:
+      registry_username: ${{ vars.QUAY_USERNAME }}
+      registry_password: ${{ secrets.QUAY_PASSWORD }}
+
+  # Frontmatter is the only skill metadata, and it is what the agent runtime
+  # uses to decide whether to read a skill at all. Gate the publish on it so
+  # an unusable skill never ships in the bundle.
+  skills-validate:
+    permissions:
+      contents: read
+    name: Validate skill frontmatter
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone the code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: go.mod
+
+      - name: Validate skill frontmatter
+        run: make skill-validate
+
+  skills:
+    needs: skills-validate
+    permissions:
+      contents: read
+    name: Build and push skill bundle
+    uses: konveyor/release-tools/.github/workflows/build-push-images.yaml@4cf4ec7e8a15336b88c3e5ba2ee126f4082f53f2 # main
+    with:
+      registry: "quay.io/konveyor"
+      image_name: skills
+      containerfile: catalog/Containerfile
+      context: catalog
+      architectures: '["amd64"]'
     secrets:
       registry_username: ${{ vars.QUAY_USERNAME }}
       registry_password: ${{ secrets.QUAY_PASSWORD }}

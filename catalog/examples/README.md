@@ -16,7 +16,7 @@ A skill image is an ordinary OCI image, so any builder will do:
 
 ```bash
 podman build -t quay.io/konveyor/skills:ejb-to-cdi \
-  -f skills/examples/ejb-to-cdi/Containerfile skills/examples/ejb-to-cdi
+  -f catalog/examples/ejb-to-cdi/Containerfile catalog/examples/ejb-to-cdi
 ```
 
 To check a skill before publishing it, run the same validation the pod
@@ -25,7 +25,7 @@ runs at init:
 ```bash
 make skill-validate
 # or one tree at a time
-go run ./cmd/skill-loader validate skills/examples
+go run ./cmd/skill-loader validate catalog/examples
 ```
 
 ## Using with SkillCard CRs
