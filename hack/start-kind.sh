@@ -4,13 +4,13 @@
 # Environment variables:
 #   KIND_CLUSTER        Cluster name (default: agentic-controller-e2e)
 #   KIND_IMAGE          Node image (default: Kind's default for the installed version)
-#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: v0.5.0)
+#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: v0.5.5)
 #   CONTAINER_TOOL      Container runtime: docker or podman (default: auto-detect)
 
 set -euo pipefail
 
 KIND_CLUSTER="${KIND_CLUSTER:-agentic-controller-e2e}"
-AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-v0.5.0}"
+AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-v0.5.5}"
 
 # Auto-detect container runtime.
 if [ -z "${CONTAINER_TOOL:-}" ]; then
