@@ -292,9 +292,8 @@ type PromptParams struct {
 
 // PromptResult is the final response from session/prompt.
 type PromptResult struct {
-	StopReason string       `json:"stopReason"`
-	Usage      *PromptUsage `json:"usage,omitempty"`
-	Chunks     []string     `json:"-"`
+	StopReason string   `json:"stopReason"`
+	Chunks     []string `json:"-"`
 
 	CostLimitReached bool `json:"-"`
 	// Cost is the last cost.amount observed during THIS call via
@@ -393,12 +392,6 @@ func LooksLikeProviderError(text string) bool {
 		}
 	}
 	return false
-}
-
-type PromptUsage struct {
-	TotalTokens  int `json:"totalTokens"`
-	InputTokens  int `json:"inputTokens"`
-	OutputTokens int `json:"outputTokens"`
 }
 
 // SendPrompt sends a prompt to a session and collects the streaming
