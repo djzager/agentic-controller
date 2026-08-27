@@ -31,7 +31,7 @@ CI pipeline) resolves application metadata before creating the CR.
 ### Key design decisions
 
 - **Agent Sandbox** is a hard dependency for workload execution
-- **Git credentials** stay in the harness — the agent does not receive
+- **Git credentials** stay in the entry point — the agent does not receive
   push credentials
 - **Skills** are Agent Skills directories, delivered as ordinary OCI images
   mounted via ImageVolumes (K8s 1.33+), git clones, or inline content
@@ -57,8 +57,9 @@ agentic-controller/
   internal/controller/    Controller implementations
   internal/skills/        Skill assembly, and SkillCard materialization
   cmd/skill-loader/       The init container and enumeration Job binary
+  docs/                   Documentation (getting started, entry point contract, API specs)
   docs/adr/               Architecture Decision Records
-  harness/                In-pod runner: git lifecycle, prompt assembly, ACP
+  harness/                In-pod entry point: git lifecycle, parameter delivery, ACP tee
   skills/                 Agent Skills directories:
     plan, execute,          shipped in the bundle image built by
     verify,                 skills/Containerfile; a SkillCard selects
