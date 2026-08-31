@@ -1,8 +1,25 @@
+---
+adr: "0010"
+title: "Skill Content Boundary — Knowledge vs Execution Control"
+description: "Defines the boundary between skill knowledge and deterministic execution controls owned by the harness."
+status: proposed
+date: "2026-08-05"
+last_updated: "2026-08-31"
+authors:
+  - "David Zager"
+last_reviewed: "2026-08-31"
+implementation_status: deferred
+review_note: "The boundary remains the intended rule, but the repository's shipped skills still contain some execution-control and container-layout instructions. The ADR remains proposed and this gap is explicit."
+---
+
 # ADR 0010: Skill Content Boundary — Knowledge vs Execution Control
 
-**Status:** proposed
-**Date:** 2026-08-05
-**Authors:** David Zager
+**Update (2026-08-31):** The boundary remains the intended authoring rule,
+but reconciliation found that the shipped `plan`, `execute`, and `verify`
+skills still contain some execution-control, commit, and `/opt/skills`
+filesystem instructions. This ADR remains proposed until those skills are
+fully migrated; ADR 0014’s native loading and ADR 0015’s loader are already
+implemented.
 
 ## Context
 

@@ -1,8 +1,25 @@
+---
+adr: "0002"
+title: "ACP Transport and Agent Observability"
+description: "Defines how ACP streaming and human-in-the-loop traffic are exposed without making the controller an ACP intermediary."
+status: accepted
+date: "2026-06-30"
+last_updated: "2026-08-31"
+authors:
+  - "David Zager"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Controller remains outside ACP and clients use the pod endpoint. The endpoint ownership and human-in-the-loop topology are revised by ADR 0008; the current entry point fronts port 4000 and Goose uses loopback port 4001."
+---
+
 # ADR 0002: ACP Transport and Agent Observability
 
-**Status:** Accepted
-**Date:** 2026-06-30
-**Authors:** David Zager
+**Update (2026-08-31):** The controller remains outside ACP and the UI still
+connects to the pod-facing ACP endpoint, but ADR 0008 changed its owner: the
+entry point tee listens on port 4000 and proxies Goose on loopback port 4001.
+The tee now carries the run stream and relays approval, steering, and
+elicitation traffic. The entry point also does not author `.konveyor/`
+commits; the agent authors commits and the entry point pushes them.
 
 ## Context
 

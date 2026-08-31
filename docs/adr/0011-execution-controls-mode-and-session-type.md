@@ -1,8 +1,25 @@
+---
+adr: "0011"
+title: "Execution Controls and Mode on CRDs"
+description: "Defines runtime-agnostic execution limits and supervision mode on CRDs, with enforcement and translation in the harness."
+status: proposed
+date: "2026-08-05"
+last_updated: "2026-08-31"
+authors:
+  - "David Zager"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Execution controls, cost monitoring, native turn limits, mode translation, and termination reporting are implemented. ADR 0018 supersedes its AgentRun field-placement and exit-2 mapping."
+---
+
 # ADR 0011: Execution Controls and Mode on CRDs
 
-**Status:** proposed
-**Date:** 2026-08-05
-**Authors:** David Zager
+**Update (2026-08-31):** The controller and entry point now implement the
+execution section of `params.json`, native turn limits, ACP cost monitoring,
+mode translation, handoff, exit codes, and opaque termination data. ADR 0018
+supersedes this ADR’s AgentRun field-placement table, workflow-stage
+stamping model, and exit-2 status mapping; those original statements remain
+as decision history.
 
 ## Context
 
