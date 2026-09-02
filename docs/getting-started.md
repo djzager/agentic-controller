@@ -11,7 +11,7 @@ AgentRun to trigger execution.
   Kubernetes 1.33–1.34, so enable `ImageVolume` there; it is on by
   default from 1.35 and GA in 1.36)
 - [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-  v0.5.x installed in the cluster
+  v1.0.x installed in the cluster
 - `kubectl` and `helm` configured to talk to the cluster
 - LLM provider credentials (e.g. GCP Vertex AI, OpenAI, Anthropic,
   AWS Bedrock)
@@ -23,7 +23,7 @@ Agent Sandbox must be installed before the controller can execute
 AgentRuns.
 
 ```bash
-AGENT_SANDBOX_TAG=v0.5.5
+AGENT_SANDBOX_TAG=v1.0.0
 
 # Clone and install via Helm
 git clone --depth 1 --branch $AGENT_SANDBOX_TAG \
@@ -49,6 +49,12 @@ kubectl wait deployment/agent-sandbox-controller \
 > cluster with them). Note also that the release assets were renamed at
 > v0.5.2 (`manifest.yaml` → `sandbox.yaml`), so pin a v0.5.2+ tag if you
 > follow the release-manifest path.
+
+> **Upgrading an existing cluster:** Agent Sandbox v1.0.0 removes the
+> legacy `v1alpha1` API and its conversion webhooks. In-place upgrades
+> from a pre-v0.5.0 install are unsupported — first upgrade to v0.5.2+,
+> run the stored-version migration, then move to v1.0.0. Fresh installs
+> (the command above) are unaffected.
 
 > **Future:** [OpenShell](https://github.com/NVIDIA/OpenShell) will
 > replace the direct Agent Sandbox dependency. When integrated, the

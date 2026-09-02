@@ -4,13 +4,18 @@
 # Environment variables:
 #   KIND_CLUSTER        Cluster name (default: agentic-controller-e2e)
 #   KIND_IMAGE          Node image (default: Kind's default for the installed version)
-#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: v0.5.5)
+#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: the version pinned in go.mod)
 #   CONTAINER_TOOL      Container runtime: docker or podman (default: auto-detect)
 
 set -euo pipefail
 
 KIND_CLUSTER="${KIND_CLUSTER:-agentic-controller-e2e}"
-AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-v0.5.5}"
+# Default the Agent Sandbox git tag from the version pinned in go.mod so the
+# deployed CRDs match the API the controller compiles against (mirrors the
+# go.mod-derived CRD path in internal/controller/suite_test.go). Override with
+# the env var to test against a different release.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-$(go -C "${REPO_ROOT}" list -m -f '{{.Version}}' sigs.k8s.io/agent-sandbox)}"
 
 # Auto-detect container runtime.
 if [ -z "${CONTAINER_TOOL:-}" ]; then
