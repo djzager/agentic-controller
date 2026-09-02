@@ -561,69 +561,71 @@ func (r *AgentRunReconciler) createSandbox(
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				// Agent Sandbox v0.5.0 copies only PodTemplate metadata
-				// onto the pod, so mirror the identifying labels here to
-				// make the pod discoverable by AgentRun / Agent name.
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels: map[string]string{
-						labelAgentRun: run.Name,
-						labelAgent:    agent.Name,
-					},
-				},
-				Spec: corev1.PodSpec{
-					// Never restart — a failed container must reach a terminal
-					// phase so the AgentRun (and workflow stage) can observe
-					// the failure. OnFailure would cause infinite crashloops
-					// (#51). The tradeoff is that transient failures (image
-					// pull blips, node eviction) are not retried. Bounded
-					// retry (backoffLimit-style) can be added later if needed.
-					RestartPolicy: corev1.RestartPolicyNever,
-					InitContainers: []corev1.Container{
-						skillLoaderContainer(r.SkillLoaderImage, skillSrc, loaderMounts),
-					},
-					Containers: []corev1.Container{
-						{
-							Name:  agentContainerName,
-							Image: agent.Spec.Image,
-							Env:   env,
-							// User-specified sources last: for duplicate
-							// keys across envFrom sources the last wins,
-							// so run.spec.envFrom overrides provider
-							// credentials.
-							EnvFrom:      append(envFrom, run.Spec.EnvFrom...),
-							VolumeMounts: volumeMounts,
-							Ports: []corev1.ContainerPort{{
-								Name:          acpPortName,
-								ContainerPort: acpPort,
-								Protocol:      corev1.ProtocolTCP,
-							}},
-							// The agent process binds the ACP port only once
-							// it can serve (the harness starts goose, waits
-							// for it, then listens), so an accepting socket
-							// IS readiness. Without this probe the pod is
-							// Ready the instant the process starts and
-							// clients dial into a not-yet-listening port.
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt32(acpPort),
-									},
-								},
-								PeriodSeconds: acpProbePeriodSeconds,
-							},
-							// The harness writes a machine-readable failure
-							// payload to the default termination-log path; the
-							// controller lifts it onto AgentRunStatus. Fall back
-							// to the last log lines if the harness dies before
-							// writing (#143).
-							TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					// Agent Sandbox copies only PodTemplate metadata
+					// onto the pod, so mirror the identifying labels here to
+					// make the pod discoverable by AgentRun / Agent name.
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							labelAgentRun: run.Name,
+							labelAgent:    agent.Name,
 						},
 					},
-					Volumes: volumes,
+					Spec: corev1.PodSpec{
+						// Never restart — a failed container must reach a terminal
+						// phase so the AgentRun (and workflow stage) can observe
+						// the failure. OnFailure would cause infinite crashloops
+						// (#51). The tradeoff is that transient failures (image
+						// pull blips, node eviction) are not retried. Bounded
+						// retry (backoffLimit-style) can be added later if needed.
+						RestartPolicy: corev1.RestartPolicyNever,
+						InitContainers: []corev1.Container{
+							skillLoaderContainer(r.SkillLoaderImage, skillSrc, loaderMounts),
+						},
+						Containers: []corev1.Container{
+							{
+								Name:  agentContainerName,
+								Image: agent.Spec.Image,
+								Env:   env,
+								// User-specified sources last: for duplicate
+								// keys across envFrom sources the last wins,
+								// so run.spec.envFrom overrides provider
+								// credentials.
+								EnvFrom:      append(envFrom, run.Spec.EnvFrom...),
+								VolumeMounts: volumeMounts,
+								Ports: []corev1.ContainerPort{{
+									Name:          acpPortName,
+									ContainerPort: acpPort,
+									Protocol:      corev1.ProtocolTCP,
+								}},
+								// The agent process binds the ACP port only once
+								// it can serve (the harness starts goose, waits
+								// for it, then listens), so an accepting socket
+								// IS readiness. Without this probe the pod is
+								// Ready the instant the process starts and
+								// clients dial into a not-yet-listening port.
+								ReadinessProbe: &corev1.Probe{
+									ProbeHandler: corev1.ProbeHandler{
+										TCPSocket: &corev1.TCPSocketAction{
+											Port: intstr.FromInt32(acpPort),
+										},
+									},
+									PeriodSeconds: acpProbePeriodSeconds,
+								},
+								// The harness writes a machine-readable failure
+								// payload to the default termination-log path; the
+								// controller lifts it onto AgentRunStatus. Fall back
+								// to the last log lines if the harness dies before
+								// writing (#143).
+								TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+							},
+						},
+						Volumes: volumes,
+					},
 				},
+				Service: &serviceEnabled,
 			},
-			Service: &serviceEnabled,
 		},
 	}
 

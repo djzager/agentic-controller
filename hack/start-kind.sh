@@ -4,13 +4,18 @@
 # Environment variables:
 #   KIND_CLUSTER        Cluster name (default: agentic-controller-e2e)
 #   KIND_IMAGE          Node image (default: Kind's default for the installed version)
-#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: v0.5.5)
+#   AGENT_SANDBOX_TAG   Agent Sandbox version (default: the version pinned in go.mod)
 #   CONTAINER_TOOL      Container runtime: docker or podman (default: auto-detect)
 
 set -euo pipefail
 
 KIND_CLUSTER="${KIND_CLUSTER:-agentic-controller-e2e}"
-AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-v0.5.5}"
+# Default the Agent Sandbox git tag from the version pinned in go.mod so the
+# deployed CRDs match the API the controller compiles against (mirrors the
+# go.mod-derived CRD path in internal/controller/suite_test.go). Override with
+# the env var to test against a different release.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+AGENT_SANDBOX_TAG="${AGENT_SANDBOX_TAG:-$(go -C "${REPO_ROOT}" list -m -f '{{.Version}}' sigs.k8s.io/agent-sandbox)}"
 
 # Auto-detect container runtime.
 if [ -z "${CONTAINER_TOOL:-}" ]; then
@@ -57,18 +62,34 @@ trap "rm -rf ${SANDBOX_DIR}" EXIT
 git clone --depth 1 --branch "${AGENT_SANDBOX_TAG}" \
     https://github.com/kubernetes-sigs/agent-sandbox.git "${SANDBOX_DIR}" 2>&1
 
-helm install agent-sandbox "${SANDBOX_DIR}/helm/" \
-    --namespace agent-sandbox-system \
-    --create-namespace \
-    --set image.tag="${AGENT_SANDBOX_TAG}" \
-    2>&1 || {
-        # If already installed, upgrade instead.
-        echo "Helm install failed, attempting upgrade..."
-        helm upgrade agent-sandbox "${SANDBOX_DIR}/helm/" \
-            --namespace agent-sandbox-system \
-            --set image.tag="${AGENT_SANDBOX_TAG}" \
-            2>&1
-    }
+if helm status agent-sandbox --namespace agent-sandbox-system &>/dev/null; then
+    # Existing release: upgrade. Helm never upgrades the CRDs in a chart's
+    # crds/ directory, so apply them first. This is load-bearing for the
+    # v0.5.x -> v1.0.0 jump — the v1 chart drops the conversion-webhook
+    # Service, so the v1beta1-only CRDs (which remove the conversion config
+    # that references it) must land before the upgrade or the old CRDs point
+    # at a Service that no longer exists. See the upstream API migration
+    # guide: https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.0/docs/api-migration-guide.md
+    # (Assumes storedVersions is already v1beta1, true for any v0.5.x-created
+    # cluster; a pre-v0.5.0 cluster needs the storage migration in that guide
+    # first — recreate the Kind cluster instead.)
+    echo "Agent Sandbox already installed; applying CRDs then upgrading to ${AGENT_SANDBOX_TAG}..."
+    kubectl apply -f "${SANDBOX_DIR}/helm/crds/"
+    helm upgrade agent-sandbox "${SANDBOX_DIR}/helm/" \
+        --namespace agent-sandbox-system \
+        --set image.tag="${AGENT_SANDBOX_TAG}"
+else
+    # Let Helm create the namespace (--create-namespace) and disable the
+    # chart's own Namespace resource (namespace.create=false). The chart
+    # renders a Namespace by default, so keeping both would make Helm create
+    # the namespace out-of-band and then collide with the chart's own
+    # Namespace object ("namespaces agent-sandbox-system already exists").
+    helm install agent-sandbox "${SANDBOX_DIR}/helm/" \
+        --namespace agent-sandbox-system \
+        --create-namespace \
+        --set namespace.create=false \
+        --set image.tag="${AGENT_SANDBOX_TAG}"
+fi
 
 echo ""
 echo "=== Waiting for Agent Sandbox controller ==="

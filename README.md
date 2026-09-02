@@ -85,7 +85,7 @@ agentic-controller/
 
 - Kubernetes 1.33+ (ImageVolume GA)
 - OpenShift 4.20+
-- Agent Sandbox v0.5.x
+- Agent Sandbox v1.0.x
 
 ## Related projects
 
