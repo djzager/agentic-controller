@@ -21,6 +21,14 @@ const (
 	// ConditionTypeReady indicates whether the resource is ready.
 	ConditionTypeReady = "Ready"
 
+	// ConditionTypeGatewayConfigured indicates whether an Agent declares at
+	// least one gateway. It is deliberately distinct from Ready: an Agent
+	// with no gateways is a valid, Ready template (a curated default can ship
+	// without knowing a customer's Gateway name), but it is not runnable until
+	// an AgentRun names a gateway. This condition lets the UI surface that
+	// not-runnable state without parsing the Ready message.
+	ConditionTypeGatewayConfigured = "GatewayConfigured"
+
 	// ConditionTypeResolvable indicates whether a SkillCard's image ref points
 	// at an artifact that actually exists in its registry. It is deliberately
 	// distinct from Ready: Ready reports that the spec was accepted and how the

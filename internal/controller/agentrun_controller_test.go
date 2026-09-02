@@ -356,7 +356,7 @@ var _ = Describe("AgentRun Controller", func() {
 			By("creating a Ready SkillCard")
 			skill := &konveyoriov1alpha1.SkillCard{
 				ObjectMeta: metav1.ObjectMeta{Name: skillName, Namespace: testNamespace},
-				Spec:       konveyoriov1alpha1.SkillCardSpec{Image: "quay.io/konveyor/skills:test-skill"},
+				Spec:       konveyoriov1alpha1.SkillCardSpec{Image: testSkillImage},
 			}
 			Expect(k8sClient.Create(ctx, skill)).To(Succeed())
 			Eventually(func(g Gomega) {
@@ -463,6 +463,92 @@ var _ = Describe("AgentRun Controller", func() {
 			Expect(k8sClient.Delete(ctx, run)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, skill)).To(Succeed())
+		})
+	})
+
+	Context("when the Agent declares no gateways and the run names one", func() {
+		const (
+			name       = "ar-ctrl-empty-list-ok"
+			agentName  = "ar-ctrl-agent-emptylist"
+			gwName     = "ar-prov-emptylist"
+			secretName = "ar-secret-emptylist"
+		)
+
+		It("should accept the run's gateway unconstrained and create a Sandbox", func() {
+			cleanup := makeReadyGateway(gwName, secretName)
+			defer cleanup()
+
+			By("creating an Agent with no gateways")
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testAgentImage,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			waitForAgentReady(agentName)
+
+			By("creating a run that names the gateway itself")
+			run := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: agentName,
+					Gateway:  gwName,
+				},
+			}
+			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+
+			runKey := types.NamespacedName{Name: name, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.AgentRun
+				g.Expect(k8sClient.Get(ctx, runKey, &fetched)).To(Succeed())
+				g.Expect(fetched.Status.SandboxName).NotTo(BeEmpty())
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, run)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+	})
+
+	Context("when the Agent declares no gateways and the run omits one", func() {
+		const (
+			name      = "ar-ctrl-empty-list-nogw"
+			agentName = "ar-ctrl-agent-emptylist-nogw"
+		)
+
+		It("should fail with a message telling the run to name a gateway", func() {
+			By("creating an Agent with no gateways")
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testAgentImage,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			waitForAgentReady(agentName)
+
+			run := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: agentName,
+				},
+			}
+			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.AgentRun
+				g.Expect(k8sClient.Get(ctx, key, &fetched)).To(Succeed())
+				g.Expect(fetched.Status.Phase).To(Equal(konveyoriov1alpha1.AgentRunPhaseFailed))
+				cond := meta.FindStatusCondition(fetched.Status.Conditions, konveyoriov1alpha1.AgentRunConditionSucceeded)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("InvalidGateway"))
+				g.Expect(cond.Message).To(ContainSubstring("declares no gateways"))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, run)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 		})
 	})
 

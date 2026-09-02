@@ -83,7 +83,13 @@ spec:
               gateways:
                 description: |-
                   Gateways is the set of gateways (provider/model combinations)
-                  available for runs. At least one gateway must be specified.
+                  available for runs. It is a presence-gated curation constraint:
+                  when populated, an AgentRun's selected gateway must be one of these
+                  (letting an architect lock an Agent to specific gateways); when empty
+                  or omitted, the controller constrains nothing and the AgentRun must
+                  name a gateway itself. An Agent with no gateways is a valid template
+                  that becomes Ready — the GatewayConfigured condition reports whether
+                  a gateway is declared, for the UI to surface not-runnable state.
                 items:
                   description: AgentGatewayRef references a Gateway by name.
                   properties:
@@ -94,7 +100,6 @@ spec:
                   required:
                   - ref
                   type: object
-                minItems: 1
                 type: array
                 x-kubernetes-list-map-keys:
                 - ref
@@ -222,7 +227,6 @@ spec:
                 - ref
                 x-kubernetes-list-type: map
             required:
-            - gateways
             - image
             type: object
           status:

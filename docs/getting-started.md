@@ -56,7 +56,7 @@ kubectl wait deployment/agent-sandbox-controller \
 > API instead of creating Sandbox CRs directly. See
 > [ADR 0004](adr/0004-openshell-as-execution-interface.md).
 
-## 2. Deploy the controller and default skills
+## 2. Deploy the controller and default resources
 
 The default image `quay.io/konveyor/agentic-controller:latest` is public
 and rebuilt on every merge to `main`, so you can deploy straight away
@@ -83,12 +83,29 @@ the controller. Verify it's running:
 kubectl get pods -n agentic-controller-system
 ```
 
-Deploy the default SkillCard and SkillCollection resources (these
-are not included in `make deploy` to avoid name-prefix conflicts):
+Deploy the default domain resources — the SkillCards and SkillCollection
+that make up the skill catalog, plus the Agents and the
+`java-ee-to-quarkus` AgentWorkflow the UI presents for users to run
+(these are not included in `make deploy` to avoid name-prefix mangling
+the cross-references between them). This is the same content the operator
+installs on enable:
 
 ```bash
-kubectl apply -k config/samples/
+kubectl apply -k config/defaults/
 ```
+
+The shipped Agents declare no gateway, so they install and become Ready
+without a provider configured — you name a gateway when you run one (step
+3 creates one). Inspect what was installed:
+
+```bash
+kubectl get skillcards,skillcollections,agents,agentworkflows
+```
+
+> **Samples vs. defaults.** `config/defaults/` holds the curated content
+> above — installed automatically by the operator. `config/samples/` holds
+> illustrative CRs you copy and edit (the Gateway samples in step 3, plus a
+> standalone example Agent and AgentRun); nothing there is auto-installed.
 
 To install only the CRDs without deploying the controller (e.g. for
 local development with `make run`):
@@ -289,9 +306,10 @@ AgentWorkflow and AgentWorkflowRun. See
 `hack/harness-test/workflow-resources.yaml` for a complete example
 that migrates a Java EE application to Quarkus using three stages.
 
-## Sample manifests
+## Sample and default manifests
 
-All sample CRs are in `config/samples/`:
+**Samples** (`config/samples/`) are illustrative CRs you copy and edit —
+nothing here is auto-installed:
 
 | File | Kind | Description |
 |------|------|-------------|
@@ -300,10 +318,19 @@ All sample CRs are in `config/samples/`:
 | `gateway_anthropic.yaml` | Gateway | Anthropic direct API |
 | `gateway_aws_bedrock.yaml` | Gateway | AWS Bedrock |
 | `gateway_xai.yaml` | Gateway | xAI (Grok) |
-| `agent_example.yaml` | Agent | Java migration agent |
-| `agentrun_example.yaml` | AgentRun | Triggers the migration agent |
-| `skillcard_*.yaml` | SkillCard | Migration skills (applied via `kubectl apply -k config/samples/`) |
-| `skillcollection_*.yaml` | SkillCollection | Grouped skills (applied via `kubectl apply -k config/samples/`) |
+| `agent_example.yaml` | Agent | Standalone Java migration agent |
+| `agentrun_example.yaml` | AgentRun | Triggers the example agent |
+
+**Defaults** (`config/defaults/`) are the curated content the operator
+installs on enable — the skill catalog plus the Agents and AgentWorkflow
+the UI runs. Apply them with `kubectl apply -k config/defaults/`:
+
+| File | Kind | Description |
+|------|------|-------------|
+| `skillcard_*.yaml` | SkillCard | Migration-stage skills (plan, execute, verify, javaee-to-quarkus, house-rules) |
+| `skillcollection_java_migration.yaml` | SkillCollection | Grouped migration skills |
+| `agent_migration_*.yaml` | Agent | Plan, execute, and verify stage agents (no gateway — named at run time) |
+| `agentworkflow_javaee_to_quarkus.yaml` | AgentWorkflow | Three-stage Java EE → Quarkus workflow |
 
 ## Local development
 

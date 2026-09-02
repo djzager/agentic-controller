@@ -6,7 +6,7 @@
 #
 # Prerequisites:
 #   - A Gateway CR (e.g. gateway_vertex_ai.yaml)
-#   - SkillCard CRs (the default samples or your own)
+#   - The javaee-to-quarkus SkillCard (shipped in config/defaults/) or your own
 apiVersion: konveyor.io/v1alpha1
 kind: Agent
 metadata:
