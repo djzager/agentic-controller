@@ -1,0 +1,11 @@
+kind: feature
+description: >
+  Ship curated default content in a new config/defaults/ directory so the UI
+  has something to present right after an operator install: the plan, execute,
+  and verify SkillCards, the java-migration SkillCollection, the
+  plan/execute/verify stage Agents, and the java-ee-to-quarkus AgentWorkflow
+  that sequences them. Apply them together with `kubectl apply -k config/defaults/`.
+  config/samples/ now holds only illustrative CRs you copy and edit (the
+  per-provider Gateways plus a standalone example Agent and AgentRun). The
+  shipped Agents declare no gateway, so they install and go Ready without a
+  provider configured; you name a gateway at run time.

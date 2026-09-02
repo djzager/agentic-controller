@@ -273,7 +273,10 @@ var _ = Describe("CRD Validation", func() {
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
 
-		It("should reject an Agent with no gateways", func() {
+		It("should accept an Agent with no gateways", func() {
+			// gateways is a presence-gated curation constraint: an empty
+			// list is valid and means the controller enforces nothing, so a
+			// curated default Agent can ship without a customer's Gateway.
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "agent-no-gateways-test",
@@ -284,9 +287,20 @@ var _ = Describe("CRD Validation", func() {
 					Gateways: []konveyoriov1alpha1.AgentGatewayRef{},
 				},
 			}
-			err := k8sClient.Create(ctx, agent)
-			Expect(err).To(HaveOccurred())
-			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+		})
+
+		It("should accept an Agent that omits gateways entirely", func() {
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "agent-omit-gateways-test",
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testImageGoose,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
 		})
 
 		// agentWithGitConfig builds an otherwise-valid Agent carrying the

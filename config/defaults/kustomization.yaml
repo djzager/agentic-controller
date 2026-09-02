@@ -1,0 +1,38 @@
+# Default domain content — the curated CRs the operator installs on enable so
+# the platform is usable and the UI is populated day one. Apply with:
+#
+#   kubectl apply -k config/defaults/
+#
+# This is distinct from config/samples/ (illustrative CRs a user copies and
+# edits, never auto-installed). See the README for the sample-vs-default split.
+#
+# These carry no namePrefix and no namespace on purpose: the Agent,
+# AgentWorkflow, SkillCollection, and their cross-references (skillCardRef,
+# agentRef) resolve by plain name, so a namePrefix would mangle them. The
+# operator applies these into the namespace where agentic is enabled.
+#
+# The push-sync-to-operator workflow (.github/workflows/) copies these files
+# verbatim into konveyor/tackle2-operator, so keep this directory limited to
+# content that is safe to install on every cluster — no Gateways (which need
+# real credentials) and no gateway references on the Agents.
+#
+# SkillCards (the skill catalog):
+#   plan, execute, verify, and javaee-to-quarkus all come out of one image
+#   (quay.io/konveyor/skills), each selected with subPath; house-rules is
+#   inline and needs no image at all.
+#
+# Agents + AgentWorkflow (what the UI runs):
+#   migration-plan/execute/verify-agent are the stages of the
+#   java-ee-to-quarkus AgentWorkflow. They omit gateways so they install and go
+#   Ready without a customer-specific Gateway; the gateway is named at run time.
+resources:
+  - skillcard_plan.yaml
+  - skillcard_execute.yaml
+  - skillcard_verify.yaml
+  - skillcard_javaee_to_quarkus.yaml
+  - skillcard_inline_house_rules.yaml
+  - skillcollection_java_migration.yaml
+  - agent_migration_plan.yaml
+  - agent_migration_execute.yaml
+  - agent_migration_verify.yaml
+  - agentworkflow_javaee_to_quarkus.yaml

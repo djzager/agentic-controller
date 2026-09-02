@@ -1,11 +1,25 @@
-# Default skill resources installed with the controller, one resource per file
-# as kubebuilder scaffolds them.
+# Samples — illustrative CRs a user copies and edits. These are NOT installed
+# automatically; they demonstrate the API and give a starting point. Apply with:
 #
-# plan and javaee-to-quarkus come out of one image, each selected with
-# subPath; house-rules is inline and needs no image at all.
+#   kubectl apply -k config/samples/
+#
+# The curated content the operator installs on enable lives in config/defaults/
+# instead. See the README for the sample-vs-default split.
+#
+# Gateways need real endpoints and credentials, so they are samples, not
+# defaults — pick the one for your provider, edit it, and create the Secret it
+# references. This kustomization aggregates only the Gateways so that
+# `kubectl apply -k config/samples/` installs self-contained resources.
+#
+# agent_example.yaml / agentrun_example.yaml are deliberately NOT listed here:
+# the example Agent references the javaee-to-quarkus SkillCard that ships in
+# config/defaults/, so applying it standalone would leave a never-Ready Agent
+# with a dangling ref. Apply those two directly with `kubectl apply -f` after
+# installing config/defaults/ and creating a Gateway (see docs/getting-started).
 resources:
-  - skillcard_plan.yaml
-  - skillcard_javaee_to_quarkus.yaml
-  - skillcard_inline_house_rules.yaml
-  - skillcollection_java_migration.yaml
+  - gateway_anthropic.yaml
+  - gateway_aws_bedrock.yaml
+  - gateway_openai.yaml
+  - gateway_vertex_ai.yaml
+  - gateway_xai.yaml
 #+kubebuilder:scaffold:manifestskustomizesamples

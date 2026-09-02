@@ -65,6 +65,12 @@ agentic-controller/
   internal/controller/    Controller implementations
   internal/skills/        Skill assembly, and SkillCard materialization
   cmd/skill-loader/       The init container and enumeration Job binary
+  config/defaults/        Curated content the operator installs on enable
+                            (skill catalog, stage Agents, AgentWorkflow) —
+                            applied verbatim, so no Gateways or gateway refs
+  config/samples/         Illustrative CRs you copy and edit (per-provider
+                            Gateways, a standalone Agent + AgentRun) — never
+                            auto-installed
   docs/                   Documentation (getting started, entry point contract, API specs)
   docs/adr/               Architecture Decision Records
   harness/                In-pod entry point: git lifecycle, parameter delivery, ACP tee

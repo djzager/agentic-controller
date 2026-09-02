@@ -51,6 +51,7 @@ const (
 	testRepoURL          = "https://github.com/test/repo.git"
 	testDefaultBranch    = "main"
 	testNonexistentAgent = "nonexistent-agent"
+	testSkillImage       = "quay.io/konveyor/skills:test-skill"
 )
 
 var (

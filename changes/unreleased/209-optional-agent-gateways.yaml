@@ -1,0 +1,10 @@
+kind: feature
+description: >
+  Make Agent.spec.gateways optional. The gateway list is now a presence-gated
+  curation constraint: when an Agent declares gateways, an AgentRun must select
+  one of them; when it declares none, the Agent is still a valid, Ready template
+  and the AgentRun must name a gateway itself. This lets curated Agents ship
+  without binding to a customer-specific Gateway. An Agent that declares a single
+  gateway still defaults it for runs that omit one. A new GatewayConfigured
+  status condition on the Agent lets the UI surface not-runnable state
+  (NoGatewaysDeclared) without treating the Agent as unhealthy.
