@@ -308,7 +308,7 @@ SKILL_IMAGE ?= quay.io/konveyor/skills:latest
 
 .PHONY: skill-build
 skill-build: ## Build the skill bundle image.
-	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f catalog/Containerfile catalog
+	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f catalog/Containerfile .
 
 .PHONY: skill-push
 skill-push: skill-build ## Build and push the skill bundle image.

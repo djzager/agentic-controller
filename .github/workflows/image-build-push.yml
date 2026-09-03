@@ -126,7 +126,7 @@ jobs:
       registry: "quay.io/konveyor"
       image_name: skills
       containerfile: catalog/Containerfile
-      context: catalog
+      context: .
       architectures: '["amd64"]'
     secrets:
       registry_username: ${{ vars.QUAY_USERNAME }}

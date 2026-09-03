@@ -10,7 +10,7 @@
 # the single-skill shape live in catalog/examples/ and are deliberately
 # outside this build context, so they never ship in the bundle.
 #
-#   podman build -t quay.io/konveyor/skills:dev -f catalog/Containerfile catalog
+#   podman build -t quay.io/konveyor/skills:dev -f catalog/Containerfile .
 #
 # The repository's own maintainer workflow skills (grill-me, submit-pr, …)
 # live in the top-level skills/ directory, not here, so they cannot leak
@@ -22,7 +22,7 @@ FROM scratch
 # subdirectory (plan, execute, verify, javaee-to-quarkus) becomes one skill
 # at /<name>/SKILL.md. Because catalog/skills holds only shipped skills,
 # this needs no per-skill allowlist.
-COPY skills/ /
+COPY catalog/skills/ /
 
 LABEL org.opencontainers.image.title="konveyor-skills" \
       org.opencontainers.image.description="Konveyor migration skills (AgentSkills.io format)" \
