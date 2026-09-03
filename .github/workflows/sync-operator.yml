@@ -79,12 +79,46 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           BASE: ${{ steps.branches.outputs.base }}
         run: |
-          if gh api "repos/konveyor/operator/branches/${BASE}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::konveyor/operator has no '${BASE}' branch yet; skipping sync. Create it upstream to resume."
+          # We must skip ONLY on a genuinely-missing branch, and fail on
+          # everything else. GitHub returns 404 both for a missing branch and
+          # for a repo the App cannot see, so a bare "did the call fail?" would
+          # mask the installation/permission problem called out in the PR
+          # description (and swallow 5xx/network errors too), leaving no sync PR
+          # and a green job. We need the actual HTTP status, which `gh api` does
+          # not surface cleanly, so query with curl and branch on the code.
+          http_status() {
+            curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/$1"
+          }
+
+          # First confirm the App can see the repo at all. A non-200 here is an
+          # access/auth problem (or an outage), never a missing branch: fail.
+          repo_status="$(http_status "repos/konveyor/operator")"
+          if [ "${repo_status}" != "200" ]; then
+            echo "::error::Cannot access konveyor/operator (HTTP ${repo_status}); check the bot App installation and permissions." >&2
+            exit 1
           fi
+
+          # Repo is reachable, so a 404 on the branch genuinely means it does
+          # not exist yet -- skip cleanly. Anything other than 200/404 (5xx,
+          # rate limit, network) is transient: fail so the run surfaces it.
+          branch_status="$(http_status "repos/konveyor/operator/branches/${BASE}")"
+          case "${branch_status}" in
+            200)
+              echo "exists=true" >> "$GITHUB_OUTPUT"
+              ;;
+            404)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::konveyor/operator has no '${BASE}' branch yet; skipping sync. Create it upstream to resume."
+              ;;
+            *)
+              echo "::error::Unexpected HTTP ${branch_status} checking konveyor/operator branch '${BASE}'." >&2
+              exit 1
+              ;;
+          esac
 
       - name: Checkout konveyor/operator
         if: steps.target.outputs.exists == 'true'
