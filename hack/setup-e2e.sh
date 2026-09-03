@@ -134,8 +134,11 @@ kubectl rollout status deployment/agentic-controller-controller-manager \
     --timeout=120s
 
 echo ""
-echo "=== Deploying sample resources ==="
-kubectl apply -k config/samples/
+echo "=== Deploying default content ==="
+# The SkillCards/SkillCollections (and the migration Agents + workflow) live in
+# config/defaults/, not config/samples/ (which now holds only Gateways that need
+# real credentials). Apply the defaults so the assertions below see the catalog.
+kubectl apply -k config/defaults/
 
 echo ""
 echo "=== Controller deployed ==="

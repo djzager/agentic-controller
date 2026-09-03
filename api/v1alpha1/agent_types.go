@@ -245,6 +245,7 @@ type AgentStatus struct {
 // +kubebuilder:resource:shortName=ag
 // +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.image`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="GatewayConfigured",type=string,JSONPath=`.status.conditions[?(@.type=="GatewayConfigured")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Agent is a capability definition declaring what is available for execution.

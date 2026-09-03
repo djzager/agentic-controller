@@ -67,7 +67,27 @@ jobs:
           application_id: ${{ vars.KONVEYOR_BOT_ID }}
           application_private_key: ${{ secrets.KONVEYOR_BOT_KEY }}
 
+      # A release-* branch may be cut here before konveyor/operator cuts the
+      # matching one. Rather than let every sync run on that branch fail with a
+      # cryptic checkout error until someone creates it upstream, detect the
+      # missing branch and skip cleanly with a warning. We do NOT fall back to
+      # main: main is driven by this repo's own main-triggered sync, so pushing
+      # release-* content there would clobber it.
+      - name: Check operator target branch exists
+        id: target
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          BASE: ${{ steps.branches.outputs.base }}
+        run: |
+          if gh api "repos/konveyor/operator/branches/${BASE}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::konveyor/operator has no '${BASE}' branch yet; skipping sync. Create it upstream to resume."
+          fi
+
       - name: Checkout konveyor/operator
+        if: steps.target.outputs.exists == 'true'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: konveyor/operator
@@ -78,12 +98,14 @@ jobs:
           persist-credentials: true
 
       - name: Render manifests into operator checkout
+        if: steps.target.outputs.exists == 'true'
         run: ./hack/sync-operator.sh operator
 
       # Regenerate the CSV so owned CRDs and clusterPermissions track the synced
       # CRDs/RBAC. Uses the operator's default VERSION/IMG, exactly as its own
       # csv-validate.yml does, so createdAt is the only unrelated churn.
       - name: Regenerate OLM bundle
+        if: steps.target.outputs.exists == 'true'
         working-directory: operator
         run: |
           make operator-sdk
@@ -95,6 +117,7 @@ jobs:
       # no-op sync is correctly detected as no change.
       - name: Detect config changes
         id: diff
+        if: steps.target.outputs.exists == 'true'
         working-directory: operator
         run: |
           git add -A -- helm/templates/crds helm/templates/rbac roles/tackle/templates/agentic bundle
@@ -107,7 +130,7 @@ jobs:
           fi
 
       - name: Push branch and open/update PR
-        if: steps.diff.outputs.changed == 'true'
+        if: steps.target.outputs.exists == 'true' && steps.diff.outputs.changed == 'true'
         working-directory: operator
         env:
           GH_TOKEN: ${{ steps.token.outputs.token }}

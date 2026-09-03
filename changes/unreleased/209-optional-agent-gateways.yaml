@@ -10,4 +10,8 @@ description: >
   requeuing indefinitely, whether or not the Agent constrains the choice. A new
   GatewayConfigured status condition on the Agent lets the UI surface
   not-runnable state (NoGatewaysDeclared) without treating the Agent as
-  unhealthy.
+  unhealthy; it also shows in `kubectl get agents`. When a workflow stage
+  fails, the AgentWorkflowRun now surfaces the stage's full message (not just
+  its reason), so guidance like "select one via spec.gateway" reaches the
+  editable AgentWorkflowRun rather than dead-ending on the immutable child
+  AgentRun.

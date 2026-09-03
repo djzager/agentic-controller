@@ -73,6 +73,18 @@ render_role() {
       { print }
     ' "${src}"
   } > "${dst}"
+  # Guard the exact-match rename above: if controller-gen ever reformats the
+  # metadata block (different indentation, quoting, or key order) the awk rule
+  # silently passes the source through unchanged, which would ship the operator's
+  # own role name -- a collision -- with no error. Fail loudly instead. (We keep
+  # the textual transform rather than reserializing with yq so the rules stay
+  # byte-for-byte identical to the source; this check restores the safety yq
+  # would have given.)
+  if ! grep -qx "  name: ${newname}" "${dst}"; then
+    echo "error: RBAC rename '${oldname}' -> '${newname}' did not apply to ${src##*/};" \
+         "controller-gen output format may have changed -- update render_role in $(basename "$0")." >&2
+    exit 1
+  fi
 }
 
 echo "==> RBAC -> ${rbac_dir}"
