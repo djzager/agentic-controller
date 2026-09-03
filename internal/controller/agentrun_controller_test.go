@@ -502,6 +502,50 @@ var _ = Describe("AgentRun Controller", func() {
 		})
 	})
 
+	Context("when the Agent declares no gateways and the run names a nonexistent one", func() {
+		const (
+			name      = "ar-ctrl-empty-list-badgw"
+			agentName = "ar-ctrl-agent-emptylist-badgw"
+			gwName    = "ar-prov-does-not-exist"
+		)
+
+		It("should fail fast with InvalidGateway rather than requeue forever", func() {
+			By("creating an Agent with no gateways")
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testAgentImage,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			waitForAgentReady(agentName)
+
+			By("creating a run that names a gateway that does not exist")
+			run := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: agentName,
+					Gateway:  gwName,
+				},
+			}
+			Expect(k8sClient.Create(ctx, run)).To(Succeed())
+
+			key := types.NamespacedName{Name: name, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.AgentRun
+				g.Expect(k8sClient.Get(ctx, key, &fetched)).To(Succeed())
+				g.Expect(fetched.Status.Phase).To(Equal(konveyoriov1alpha1.AgentRunPhaseFailed))
+				cond := meta.FindStatusCondition(fetched.Status.Conditions, konveyoriov1alpha1.AgentRunConditionSucceeded)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(cond.Reason).To(Equal("InvalidGateway"))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, run)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+	})
+
 	Context("when the Agent declares no gateways and the run omits one", func() {
 		const (
 			name      = "ar-ctrl-empty-list-nogw"

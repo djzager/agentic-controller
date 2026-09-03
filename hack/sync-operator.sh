@@ -40,9 +40,13 @@ rbac_dir="${OPERATOR}/helm/templates/rbac"
 agentic_dir="${OPERATOR}/roles/tackle/templates/agentic"
 defaults_dir="${agentic_dir}/defaults"
 
-# CRDs -- verbatim copy of every konveyor.io CRD.
+# CRDs -- verbatim copy of every konveyor.io CRD. Clear our own CRDs first (by
+# the konveyor.io_ prefix, so other operators' CRDs in this dir are untouched)
+# so a renamed or removed CRD does not leave a stale file behind, matching the
+# defaults sync below.
 echo "==> CRDs -> ${crd_dir}"
 mkdir -p "${crd_dir}"
+rm -f "${crd_dir}"/konveyor.io_*.yaml
 cp "${REPO_ROOT}"/config/crd/bases/konveyor.io_*.yaml "${crd_dir}/"
 
 # RBAC roles -- rename metadata.name and strip the kustomize labels block, then

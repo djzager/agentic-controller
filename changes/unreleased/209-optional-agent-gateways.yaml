@@ -5,6 +5,9 @@ description: >
   one of them; when it declares none, the Agent is still a valid, Ready template
   and the AgentRun must name a gateway itself. This lets curated Agents ship
   without binding to a customer-specific Gateway. An Agent that declares a single
-  gateway still defaults it for runs that omit one. A new GatewayConfigured
-  status condition on the Agent lets the UI surface not-runnable state
-  (NoGatewaysDeclared) without treating the Agent as unhealthy.
+  gateway still defaults it for runs that omit one. A run that names a Gateway
+  which does not exist now fails fast (Failed/InvalidGateway) instead of
+  requeuing indefinitely, whether or not the Agent constrains the choice. A new
+  GatewayConfigured status condition on the Agent lets the UI surface
+  not-runnable state (NoGatewaysDeclared) without treating the Agent as
+  unhealthy.

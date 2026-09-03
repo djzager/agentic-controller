@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -136,6 +137,17 @@ const (
 	// agentRunRefIndexField is the field index for looking up AgentRuns by agentRef.
 	agentRunRefIndexField = ".spec.agentRef"
 )
+
+// errGatewayNotFound marks a createSandbox failure caused by the run's selected
+// Gateway CR not existing. Most createSandbox failures are transient and
+// requeued, but a missing Gateway is terminal: validateGateway cannot catch a
+// bad name when the Agent declares no gateways (an empty list constrains
+// nothing), so the typo only surfaces here. Treating it as terminal gives the
+// unconstrained path the same fail-fast behaviour as the constrained one,
+// rather than requeuing indefinitely on a name that will never resolve. A
+// Gateway that exists but is not yet Ready stays transient — it may become
+// ready — as do missing SkillCards/SkillCollections.
+var errGatewayNotFound = stderrors.New("selected gateway does not exist")
 
 // AgentRunReconciler reconciles an AgentRun object.
 type AgentRunReconciler struct {
@@ -261,6 +273,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
 		if err != nil {
+			// A named gateway that does not exist is terminal, not transient:
+			// it will never resolve on requeue. This is the fail-fast path for
+			// an unconstrained Agent (empty gateway list), matching how
+			// validateGateway already rejects a bad name on a constrained one.
+			if stderrors.Is(err, errGatewayNotFound) {
+				logger.Info("AgentRun references a nonexistent gateway", "agentRun", run.Name, "gateway", run.Spec.Gateway)
+				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
+				return r.patchRunStatus(ctx, &run, original)
+			}
 			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
 			// Transient — the reconcile requeues with backoff — so the
 			// run is not yet failed; Succeeded stays Unknown.
@@ -782,6 +804,9 @@ func (r *AgentRunReconciler) buildEnvVars(
 		var gateway konveyoriov1alpha1.Gateway
 		gwKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.Gateway}
 		if err := r.Get(ctx, gwKey, &gateway); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, nil, fmt.Errorf("%w: %q", errGatewayNotFound, run.Spec.Gateway)
+			}
 			return nil, nil, fmt.Errorf("looking up Gateway %q: %w", run.Spec.Gateway, err)
 		}
 		// Verify the Gateway is currently Ready. Agent readiness can
