@@ -1,25 +1,19 @@
-# Samples — illustrative CRs a user copies and edits. These are NOT installed
-# automatically; they demonstrate the API and give a starting point. Apply with:
+# Samples — illustrative CRs you copy and edit. They are NOT installed
+# automatically: the operator installs curated content from config/defaults/
+# instead (see the README for the sample-vs-default split). Apply the ones you
+# need individually with `kubectl apply -f`, e.g.:
 #
-#   kubectl apply -k config/samples/
+#   # pick the Gateway for your provider, edit it, and create the Secret it
+#   # references:
+#   kubectl apply -f config/samples/gateway_anthropic.yaml
+#   # then, once config/defaults/ is installed, the example Agent/AgentRun:
+#   kubectl apply -f config/samples/agent_example.yaml
 #
-# The curated content the operator installs on enable lives in config/defaults/
-# instead. See the README for the sample-vs-default split.
-#
-# Gateways need real endpoints and credentials, so they are samples, not
-# defaults — pick the one for your provider, edit it, and create the Secret it
-# references. This kustomization aggregates only the Gateways so that
-# `kubectl apply -k config/samples/` installs self-contained resources.
-#
-# agent_example.yaml / agentrun_example.yaml are deliberately NOT listed here:
-# the example Agent references the javaee-to-quarkus SkillCard that ships in
-# config/defaults/, so applying it standalone would leave a never-Ready Agent
-# with a dangling ref. Apply those two directly with `kubectl apply -f` after
-# installing config/defaults/ and creating a Gateway (see docs/getting-started).
-resources:
-  - gateway_anthropic.yaml
-  - gateway_aws_bedrock.yaml
-  - gateway_openai.yaml
-  - gateway_vertex_ai.yaml
-  - gateway_xai.yaml
+# These are deliberately NOT aggregated as kustomize resources. Each Gateway
+# needs its own real endpoint and credentials, so `kubectl apply -k` here would
+# create every provider's Gateway at once — most referencing Secrets you never
+# made — and the example Agent references a SkillCard that ships in
+# config/defaults/, so it would dangle if applied before those. Apply what you
+# need directly; see docs/getting-started.md for the full walk-through.
+resources: []
 #+kubebuilder:scaffold:manifestskustomizesamples

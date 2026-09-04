@@ -509,7 +509,7 @@ var _ = Describe("AgentRun Controller", func() {
 			gwName    = "ar-prov-does-not-exist"
 		)
 
-		It("should fail fast with InvalidGateway rather than requeue forever", func() {
+		It("should wait with GatewayNotFound and retry rather than fail terminally", func() {
 			By("creating an Agent with no gateways")
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{Name: agentName, Namespace: testNamespace},
@@ -530,15 +530,25 @@ var _ = Describe("AgentRun Controller", func() {
 			}
 			Expect(k8sClient.Create(ctx, run)).To(Succeed())
 
+			By("observing a non-terminal GatewayNotFound wait (retried with backoff)")
 			key := types.NamespacedName{Name: name, Namespace: testNamespace}
 			Eventually(func(g Gomega) {
 				var fetched konveyoriov1alpha1.AgentRun
 				g.Expect(k8sClient.Get(ctx, key, &fetched)).To(Succeed())
-				g.Expect(fetched.Status.Phase).To(Equal(konveyoriov1alpha1.AgentRunPhaseFailed))
+				g.Expect(fetched.Status.Phase).NotTo(Equal(konveyoriov1alpha1.AgentRunPhaseFailed))
 				cond := meta.FindStatusCondition(fetched.Status.Conditions, konveyoriov1alpha1.AgentRunConditionSucceeded)
 				g.Expect(cond).NotTo(BeNil())
-				g.Expect(cond.Status).To(Equal(metav1.ConditionFalse))
-				g.Expect(cond.Reason).To(Equal("InvalidGateway"))
+				g.Expect(cond.Status).To(Equal(metav1.ConditionUnknown))
+				g.Expect(cond.Reason).To(Equal("GatewayNotFound"))
+			}, timeout, interval).Should(Succeed())
+
+			By("recovering once the Gateway is created")
+			cleanup := makeReadyGateway(gwName, "ar-secret-badgw-recover")
+			defer cleanup()
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.AgentRun
+				g.Expect(k8sClient.Get(ctx, key, &fetched)).To(Succeed())
+				g.Expect(fetched.Status.SandboxName).NotTo(BeEmpty())
 			}, timeout, interval).Should(Succeed())
 
 			Expect(k8sClient.Delete(ctx, run)).To(Succeed())

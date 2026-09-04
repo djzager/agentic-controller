@@ -139,14 +139,12 @@ const (
 )
 
 // errGatewayNotFound marks a createSandbox failure caused by the run's selected
-// Gateway CR not existing. Most createSandbox failures are transient and
-// requeued, but a missing Gateway is terminal: validateGateway cannot catch a
-// bad name when the Agent declares no gateways (an empty list constrains
-// nothing), so the typo only surfaces here. Treating it as terminal gives the
-// unconstrained path the same fail-fast behaviour as the constrained one,
-// rather than requeuing indefinitely on a name that will never resolve. A
-// Gateway that exists but is not yet Ready stays transient — it may become
-// ready — as do missing SkillCards/SkillCollections.
+// Gateway CR not existing (as opposed to existing-but-not-Ready, or any other
+// createSandbox error). The caller uses it to report a distinct GatewayNotFound
+// status reason and retry with backoff, ImagePullBackOff-style: a missing
+// Gateway is treated as a timing condition that may resolve on its own (the CR
+// is applied moments later, or the informer cache catches up), not a terminal
+// failure that would strand a run whose spec is immutable.
 var errGatewayNotFound = stderrors.New("selected gateway does not exist")
 
 // AgentRunReconciler reconciles an AgentRun object.
@@ -273,21 +271,28 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
 		if err != nil {
-			// A named gateway that does not exist is terminal, not transient:
-			// it will never resolve on requeue. This is the fail-fast path for
-			// an unconstrained Agent (empty gateway list), matching how
-			// validateGateway already rejects a bad name on a constrained one.
+			// A named Gateway that does not exist yet is treated like a
+			// missing container image (ImagePullBackOff): retriable, not
+			// terminal. It may be created moments after the run (a bundled
+			// GitOps apply of Gateway+Agent+AgentRun), or simply be lagging
+			// the informer cache. Failing terminally would strand a run whose
+			// spec is immutable -- the user could only delete and recreate to
+			// recover from what is really a timing issue. We surface a distinct
+			// GatewayNotFound reason so the wait is legible, then requeue with
+			// the same exponential backoff every transient createSandbox error
+			// uses.
+			reason := "SandboxCreationFailed"
+			msg := fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err)
 			if stderrors.Is(err, errGatewayNotFound) {
-				logger.Info("AgentRun references a nonexistent gateway", "agentRun", run.Name, "gateway", run.Spec.Gateway)
-				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-				setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
-				return r.patchRunStatus(ctx, &run, original)
+				reason = "GatewayNotFound"
+				msg = fmt.Sprintf("Gateway %q not found; waiting for it to be created", run.Spec.Gateway)
+				logger.Info("AgentRun references a Gateway that does not exist yet; will retry", "agentRun", run.Name, "gateway", run.Spec.Gateway)
+			} else {
+				logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
 			}
-			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
 			// Transient — the reconcile requeues with backoff — so the
 			// run is not yet failed; Succeeded stays Unknown.
-			setRunSucceeded(&run, metav1.ConditionUnknown, "SandboxCreationFailed",
-				fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err))
+			setRunSucceeded(&run, metav1.ConditionUnknown, reason, msg)
 			// Patch status then return the error so controller-runtime
 			// requeues with exponential backoff.
 			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {

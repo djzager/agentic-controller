@@ -6,8 +6,11 @@ description: >
   and the AgentRun must name a gateway itself. This lets curated Agents ship
   without binding to a customer-specific Gateway. An Agent that declares a single
   gateway still defaults it for runs that omit one. A run that names a Gateway
-  which does not exist now fails fast (Failed/InvalidGateway) instead of
-  requeuing indefinitely, whether or not the Agent constrains the choice. A new
+  which does not exist yet waits with a distinct GatewayNotFound reason and is
+  retried with backoff (ImagePullBackOff-style) rather than failing terminally,
+  so a Gateway applied moments after the run — or one still lagging the informer
+  cache — recovers on its own instead of stranding a run whose spec is
+  immutable. A new
   GatewayConfigured status condition on the Agent lets the UI surface
   not-runnable state (NoGatewaysDeclared) without treating the Agent as
   unhealthy; it also shows in `kubectl get agents`. When a workflow stage
