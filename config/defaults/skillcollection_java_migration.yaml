@@ -6,6 +6,8 @@ apiVersion: konveyor.io/v1alpha1
 kind: SkillCollection
 metadata:
   name: java-migration-skills
+  labels:
+    app.kubernetes.io/managed-by: agentic-controller-defaults
 spec:
   version: "2.0.0"
   skills:

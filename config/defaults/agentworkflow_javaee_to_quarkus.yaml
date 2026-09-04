@@ -18,6 +18,8 @@ apiVersion: konveyor.io/v1alpha1
 kind: AgentWorkflow
 metadata:
   name: java-ee-to-quarkus
+  labels:
+    app.kubernetes.io/managed-by: agentic-controller-defaults
 spec:
   guide: "Migrate a Java EE application to Quarkus 3"
   stages:
