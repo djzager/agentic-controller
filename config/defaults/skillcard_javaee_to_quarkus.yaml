@@ -4,6 +4,8 @@ apiVersion: konveyor.io/v1alpha1
 kind: SkillCard
 metadata:
   name: javaee-to-quarkus
+  labels:
+    app.kubernetes.io/managed-by: agentic-controller-defaults
 spec:
   image: quay.io/konveyor/skills:latest
   subPath: javaee-to-quarkus

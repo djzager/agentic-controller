@@ -104,7 +104,7 @@ var _ = Describe("Agent Controller", func() {
 					Namespace: testNamespace,
 				},
 				Spec: konveyoriov1alpha1.SkillCardSpec{
-					Image: "quay.io/konveyor/skills:test-skill",
+					Image: testSkillImage,
 				},
 			}
 			Expect(k8sClient.Create(ctx, skill)).To(Succeed())
@@ -142,12 +142,80 @@ var _ = Describe("Agent Controller", func() {
 				g.Expect(readyCond).NotTo(BeNil())
 				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
 				g.Expect(readyCond.Reason).To(Equal("AllDependenciesReady"))
+
+				gwCond := meta.FindStatusCondition(fetched.Status.Conditions, ConditionTypeGatewayConfigured)
+				g.Expect(gwCond).NotTo(BeNil())
+				g.Expect(gwCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(gwCond.Reason).To(Equal("GatewaysReady"))
 			}, timeout, interval).Should(Succeed())
 
 			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, skill)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, provider)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, secret)).To(Succeed())
+		})
+	})
+
+	Context("when the Agent declares no gateways", func() {
+		const (
+			agentName = "agent-ctrl-no-gateways"
+			skillName = "agent-ctrl-no-gw-skill"
+		)
+
+		It("should be Ready but GatewayConfigured=False", func() {
+			By("creating a Ready SkillCard")
+			skill := &konveyoriov1alpha1.SkillCard{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      skillName,
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.SkillCardSpec{
+					Image: testSkillImage,
+				},
+			}
+			Expect(k8sClient.Create(ctx, skill)).To(Succeed())
+
+			scKey := types.NamespacedName{Name: skillName, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.SkillCard
+				g.Expect(k8sClient.Get(ctx, scKey, &fetched)).To(Succeed())
+				readyCond := meta.FindStatusCondition(fetched.Status.Conditions, ConditionTypeReady)
+				g.Expect(readyCond).NotTo(BeNil())
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+			}, timeout, interval).Should(Succeed())
+
+			By("creating an Agent with no gateways")
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      agentName,
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image:      testAgentImage,
+					SkillCards: []konveyoriov1alpha1.AgentSkillCardRef{{Ref: skillName}},
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+
+			By("verifying it is Ready but not GatewayConfigured")
+			agentKey := types.NamespacedName{Name: agentName, Namespace: testNamespace}
+			Eventually(func(g Gomega) {
+				var fetched konveyoriov1alpha1.Agent
+				g.Expect(k8sClient.Get(ctx, agentKey, &fetched)).To(Succeed())
+
+				readyCond := meta.FindStatusCondition(fetched.Status.Conditions, ConditionTypeReady)
+				g.Expect(readyCond).NotTo(BeNil())
+				g.Expect(readyCond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(readyCond.Reason).To(Equal("AllDependenciesReady"))
+
+				gwCond := meta.FindStatusCondition(fetched.Status.Conditions, ConditionTypeGatewayConfigured)
+				g.Expect(gwCond).NotTo(BeNil())
+				g.Expect(gwCond.Status).To(Equal(metav1.ConditionFalse))
+				g.Expect(gwCond.Reason).To(Equal("NoGatewaysDeclared"))
+			}, timeout, interval).Should(Succeed())
+
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, skill)).To(Succeed())
 		})
 	})
 
@@ -193,8 +261,7 @@ var _ = Describe("Agent Controller", func() {
 					Namespace: testNamespace,
 				},
 				Spec: konveyoriov1alpha1.AgentSpec{
-					Image: testAgentImage,
-					// Need at least one gateway for MinItems=1.
+					Image:      testAgentImage,
 					Gateways:   []konveyoriov1alpha1.AgentGatewayRef{{Ref: testGatewayName}},
 					SkillCards: []konveyoriov1alpha1.AgentSkillCardRef{{Ref: "nonexistent-skill"}},
 				},

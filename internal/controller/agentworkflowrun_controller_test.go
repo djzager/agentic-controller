@@ -550,17 +550,19 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				stageRunName = fetched.Status.Stages[0].AgentRunName
 			}, timeout, interval).Should(Succeed())
 
-			By("simulating stage-1 failure")
+			By("simulating stage-1 failure with an actionable message")
+			const childMsg = "agent \"apr-ctrl-fail-agent\" declares no gateways; select one via spec.gateway"
 			updateAgentRunStatus(stageRunName, func(run *konveyoriov1alpha1.AgentRun) {
 				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
 				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:   konveyoriov1alpha1.AgentRunConditionSucceeded,
-					Status: metav1.ConditionFalse,
-					Reason: "Failed",
+					Type:    konveyoriov1alpha1.AgentRunConditionSucceeded,
+					Status:  metav1.ConditionFalse,
+					Reason:  "InvalidGateway",
+					Message: childMsg,
 				})
 			})
 
-			By("verifying the workflow run fails")
+			By("verifying the workflow run fails and surfaces the child's message")
 			Eventually(func(g Gomega) {
 				var fetched konveyoriov1alpha1.AgentWorkflowRun
 				g.Expect(k8sClient.Get(ctx, pbRunKey, &fetched)).To(Succeed())
@@ -569,6 +571,10 @@ var _ = Describe("AgentWorkflowRun Controller", func() {
 				readyCond := meta.FindStatusCondition(fetched.Status.Conditions, ConditionTypeReady)
 				g.Expect(readyCond).NotTo(BeNil())
 				g.Expect(readyCond.Reason).To(Equal("StageFailed"))
+				// The child AgentRun is immutable, so its own status is a dead
+				// end for the user; the actionable guidance must reach the
+				// AgentWorkflowRun (which has its own spec.gateway to set).
+				g.Expect(readyCond.Message).To(ContainSubstring(childMsg))
 			}, timeout, interval).Should(Succeed())
 
 			By("verifying stage-2 was never started")

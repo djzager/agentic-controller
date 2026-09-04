@@ -291,12 +291,23 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
 		now := metav1.Now()
 		pbRun.Status.CompletionTime = &now
+		// Surface the child AgentRun's full message, not just its Reason: the
+		// child is immutable and controller-managed, so its own status is a
+		// dead end for the user. The actionable guidance (e.g. "select one via
+		// spec.gateway") only reaches an editable resource here -- and because
+		// spec.gateway on the AgentWorkflowRun is what feeds the stage, that
+		// guidance reads correctly against this resource. Fall back to Reason
+		// when the child left no message.
+		detail := succeeded.Message
+		if detail == "" {
+			detail = succeeded.Reason
+		}
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: pbRun.Generation,
 			Reason:             "StageFailed",
-			Message:            fmt.Sprintf("Stage %q did not succeed: %s", stage.Name, succeeded.Reason),
+			Message:            fmt.Sprintf("Stage %q did not succeed: %s", stage.Name, detail),
 		})
 		return r.patchRunStatus(ctx, &pbRun, original)
 

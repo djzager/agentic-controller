@@ -18,9 +18,10 @@ resources:
 - ../crd
 - ../rbac
 - ../manager
-# Default skill resources are applied separately to avoid namePrefix
-# mangling skillCardRef cross-references. See config/samples/.
-# Apply with: kubectl apply -k config/samples/ -n <namespace>
+# Default domain content (SkillCards, SkillCollections, Agents, the
+# AgentWorkflow) is applied separately to avoid namePrefix mangling the
+# skillCardRef/agentRef cross-references. See config/defaults/.
+# Apply with: kubectl apply -k config/defaults/ -n <namespace>
 # [WEBHOOK] To enable webhook, uncomment all the sections with [WEBHOOK] prefix including the one in
 # crd/kustomization.yaml
 #- ../webhook

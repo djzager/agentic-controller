@@ -1,0 +1,20 @@
+kind: feature
+description: >
+  Make Agent.spec.gateways optional. The gateway list is now a presence-gated
+  curation constraint: when an Agent declares gateways, an AgentRun must select
+  one of them; when it declares none, the Agent is still a valid, Ready template
+  and the AgentRun must name a gateway itself. This lets curated Agents ship
+  without binding to a customer-specific Gateway. An Agent that declares a single
+  gateway still defaults it for runs that omit one. A run that names a Gateway
+  which does not exist yet waits with a distinct GatewayNotFound reason and is
+  retried with backoff (ImagePullBackOff-style) rather than failing terminally,
+  so a Gateway applied moments after the run — or one still lagging the informer
+  cache — recovers on its own instead of stranding a run whose spec is
+  immutable. A new
+  GatewayConfigured status condition on the Agent lets the UI surface
+  not-runnable state (NoGatewaysDeclared) without treating the Agent as
+  unhealthy; it also shows in `kubectl get agents`. When a workflow stage
+  fails, the AgentWorkflowRun now surfaces the stage's full message (not just
+  its reason), so guidance like "select one via spec.gateway" reaches the
+  editable AgentWorkflowRun rather than dead-ending on the immutable child
+  AgentRun.

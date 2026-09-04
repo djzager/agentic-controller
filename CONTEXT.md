@@ -47,14 +47,21 @@ field names and interaction model are designed to make this swap seamless.
 
 **Agent** — A capability definition declaring what is available for
 execution. References zero or more SkillCards and SkillCollections,
-one or more Gateways (each representing a provider/model combination
-available for runs), a container image (carrying the agent runtime
+zero or more Gateways (each a provider/model combination permitted for
+runs), a container image (carrying the agent runtime
 and language toolchains), a prompt (standing instructions for how the
 agent operates), and optionally a memory service for accumulating
 domain knowledge across executions. An Agent does not select a
-specific model — it declares what is available. Gateway selection
-happens at execution time in the AgentRun. The Agent controller
-validates that referenced Gateway CRs exist in the namespace and that
+specific model — it declares which gateways are permitted, and gateway
+selection happens at execution time in the AgentRun. The gateway list
+is a curation constraint, presence-gated: when the Agent lists
+gateways, a run's selection must be one of them (an architect can lock
+an Agent to a single gateway); when the list is empty the controller
+constrains nothing — the run must name a gateway itself, and what an
+empty list means to a user (not yet runnable, or free choice) is a
+Hub/UI concern, not the controller's. An Agent with no gateways is
+still a valid, Ready template. The Agent controller validates that any
+referenced Gateway CRs exist in the namespace and are Ready, and that
 SkillCards/SkillCollections are ready. When OpenShell is integrated,
 Gateway CRs will be replaced by OpenShell Gateway Services.
 Subagent delegation is a runtime concern — the agent runtime may
@@ -248,6 +255,28 @@ _Avoid_: telling the LLM to read parameters from the environment or
 count its own iterations — if a program could do it deterministically,
 it belongs in the harness.
 
+## Packaging
+
+**Default** — Curated content the platform ships and installs on enable so
+it is usable and the UI is populated day one: the stage SkillCards and
+SkillCollection, the migration-stage Agents, and the java-ee-to-quarkus
+AgentWorkflow. Lives in `config/defaults/`. Defaults carry no namePrefix,
+no namespace, and no Gateway references — they resolve by plain name and
+install Ready without customer-specific credentials, so they are safe to
+apply on every cluster. The push-sync-to-operator workflow copies this
+directory verbatim into konveyor/tackle2-operator, which applies it into
+the namespace where agentic is enabled.
+_Avoid_: putting a Gateway or a gateway reference in a Default — Gateways
+need real endpoints and credentials, which makes them a Sample, not a
+Default.
+
+**Sample** — Illustrative CRs a user copies and edits; never
+auto-installed. Lives in `config/samples/`: the per-provider Gateways
+(each needs a real endpoint and Secret) and a standalone example Agent and
+AgentRun. Samples demonstrate the API and give a starting point.
+_Avoid_: treating Samples as shipped content — nothing in `config/samples/`
+is installed by `make deploy` or the operator.
+
 ## Relationships
 
 - A **SkillCard** is one skill, from one of three sources: OCI image
@@ -257,10 +286,13 @@ it belongs in the harness.
   naming a source directly.
 - An **Agent** references zero or more **SkillCards** and zero or more
   **SkillCollections**.
-- An **Agent** references one or more **Gateways** — declaring the
-  set of provider/model combinations available for runs.
-- An **AgentRun** references one **Agent** and selects one **Gateway**
-  from the Agent's available set.
+- An **Agent** references zero or more **Gateways** — declaring the
+  permitted set of provider/model combinations for runs. An empty set
+  is unconstrained at the controller level (see the Agent entry).
+- An **AgentRun** references one **Agent** and selects one **Gateway**.
+  When the Agent lists gateways the selection must be one of them;
+  when the Agent lists none the run may name any Gateway, which must
+  exist and be Ready.
 - An **AgentWorkflow** organizes work into stages. Each stage
   references an **Agent** and carries instructions.
 - An **AgentWorkflowRun** references one **AgentWorkflow** (or inlines it)

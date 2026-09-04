@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"regexp"
@@ -136,6 +137,15 @@ const (
 	// agentRunRefIndexField is the field index for looking up AgentRuns by agentRef.
 	agentRunRefIndexField = ".spec.agentRef"
 )
+
+// errGatewayNotFound marks a createSandbox failure caused by the run's selected
+// Gateway CR not existing (as opposed to existing-but-not-Ready, or any other
+// createSandbox error). The caller uses it to report a distinct GatewayNotFound
+// status reason and retry with backoff, ImagePullBackOff-style: a missing
+// Gateway is treated as a timing condition that may resolve on its own (the CR
+// is applied moments later, or the informer cache catches up), not a terminal
+// failure that would strand a run whose spec is immutable.
+var errGatewayNotFound = stderrors.New("selected gateway does not exist")
 
 // AgentRunReconciler reconciles an AgentRun object.
 type AgentRunReconciler struct {
@@ -261,11 +271,28 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
 		if err != nil {
-			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
+			// A named Gateway that does not exist yet is treated like a
+			// missing container image (ImagePullBackOff): retriable, not
+			// terminal. It may be created moments after the run (a bundled
+			// GitOps apply of Gateway+Agent+AgentRun), or simply be lagging
+			// the informer cache. Failing terminally would strand a run whose
+			// spec is immutable -- the user could only delete and recreate to
+			// recover from what is really a timing issue. We surface a distinct
+			// GatewayNotFound reason so the wait is legible, then requeue with
+			// the same exponential backoff every transient createSandbox error
+			// uses.
+			reason := "SandboxCreationFailed"
+			msg := fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err)
+			if stderrors.Is(err, errGatewayNotFound) {
+				reason = "GatewayNotFound"
+				msg = fmt.Sprintf("Gateway %q not found; waiting for it to be created", run.Spec.Gateway)
+				logger.Info("AgentRun references a Gateway that does not exist yet; will retry", "agentRun", run.Name, "gateway", run.Spec.Gateway)
+			} else {
+				logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
+			}
 			// Transient — the reconcile requeues with backoff — so the
 			// run is not yet failed; Succeeded stays Unknown.
-			setRunSucceeded(&run, metav1.ConditionUnknown, "SandboxCreationFailed",
-				fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err))
+			setRunSucceeded(&run, metav1.ConditionUnknown, reason, msg)
 			// Patch status then return the error so controller-runtime
 			// requeues with exponential backoff.
 			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {
@@ -385,28 +412,44 @@ func renderPromptAndInstructions(
 	return prompt, instructions, nil
 }
 
-// validateGateway checks that the selected gateway is in the Agent's
-// available gateway set. The Agent controller already watches Gateway
-// CRs and won't report Ready if a referenced Gateway is missing, so
-// the "Agent not Ready" check upstream catches dangling references.
-// This function validates the AgentRun's selection against the Agent's
-// declared set only — it does not re-verify the Gateway CR exists.
+// validateGateway resolves and validates the gateway for a run against the
+// Agent's declared gateway set, which is a presence-gated curation constraint:
+//   - Run names a gateway + Agent list non-empty: enforce membership (the
+//     architect has locked the Agent to specific gateways).
+//   - Run names a gateway + Agent list empty: accept it unconstrained. The
+//     Gateway CR must still exist and be Ready, which createSandbox enforces.
+//   - Run omits a gateway + Agent declares exactly one: default to it.
+//   - Run omits a gateway + Agent declares zero or multiple: error. The
+//     zero and multiple cases get distinct messages because the fix differs —
+//     name any gateway vs. pick one of the declared set.
+//
+// The Agent controller already watches Gateway CRs and won't report Ready if a
+// declared Gateway is missing, so dangling references in a non-empty list are
+// caught upstream by the "Agent not Ready" check.
 func (r *AgentRunReconciler) validateGateway(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
 ) error {
 	if run.Spec.Gateway == "" {
 		// Default to the Agent's only gateway when exactly one is
-		// declared. When multiple are available, require explicit
-		// selection so the run fails fast instead of dying at runtime
-		// on missing KONVEYOR_LLM_MODEL.
+		// declared. Otherwise require explicit selection so the run fails
+		// fast instead of dying at runtime on a missing gateway.
 		switch len(agent.Spec.Gateways) {
 		case 1:
 			run.Spec.Gateway = agent.Spec.Gateways[0].Ref
+			return nil
+		case 0:
+			return fmt.Errorf("agent %q declares no gateways; select one via spec.gateway",
+				agent.Name)
 		default:
 			return fmt.Errorf("agent %q declares %d gateways; select one via spec.gateway",
 				agent.Name, len(agent.Spec.Gateways))
 		}
+	}
+	// An empty Agent gateway list constrains nothing: accept the run's
+	// selection as-is. createSandbox verifies the Gateway CR exists and is
+	// Ready before it is used.
+	if len(agent.Spec.Gateways) == 0 {
 		return nil
 	}
 	for _, g := range agent.Spec.Gateways {
@@ -766,6 +809,9 @@ func (r *AgentRunReconciler) buildEnvVars(
 		var gateway konveyoriov1alpha1.Gateway
 		gwKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.Gateway}
 		if err := r.Get(ctx, gwKey, &gateway); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, nil, fmt.Errorf("%w: %q", errGatewayNotFound, run.Spec.Gateway)
+			}
 			return nil, nil, fmt.Errorf("looking up Gateway %q: %w", run.Spec.Gateway, err)
 		}
 		// Verify the Gateway is currently Ready. Agent readiness can

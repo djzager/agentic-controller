@@ -181,11 +181,17 @@ type AgentSpec struct {
 	Prompt string `json:"prompt,omitempty"`
 
 	// Gateways is the set of gateways (provider/model combinations)
-	// available for runs. At least one gateway must be specified.
-	// +kubebuilder:validation:MinItems=1
+	// available for runs. It is a presence-gated curation constraint:
+	// when populated, an AgentRun's selected gateway must be one of these
+	// (letting an architect lock an Agent to specific gateways); when empty
+	// or omitted, the controller constrains nothing and the AgentRun must
+	// name a gateway itself. An Agent with no gateways is a valid template
+	// that becomes Ready — the GatewayConfigured condition reports whether
+	// a gateway is declared, for the UI to surface not-runnable state.
+	// +optional
 	// +listType=map
 	// +listMapKey=ref
-	Gateways []AgentGatewayRef `json:"gateways"`
+	Gateways []AgentGatewayRef `json:"gateways,omitempty"`
 
 	// SkillCards references individual SkillCard CRs.
 	// +optional
@@ -239,6 +245,7 @@ type AgentStatus struct {
 // +kubebuilder:resource:shortName=ag
 // +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.image`,priority=1
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
+// +kubebuilder:printcolumn:name="GatewayConfigured",type=string,JSONPath=`.status.conditions[?(@.type=="GatewayConfigured")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
 // Agent is a capability definition declaring what is available for execution.

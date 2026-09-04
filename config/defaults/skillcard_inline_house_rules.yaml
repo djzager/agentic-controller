@@ -19,6 +19,8 @@ apiVersion: konveyor.io/v1alpha1
 kind: SkillCard
 metadata:
   name: house-rules
+  labels:
+    app.kubernetes.io/managed-by: agentic-controller-defaults
 spec:
   displayName: House Rules
   version: "1.0.0"

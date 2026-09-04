@@ -97,7 +97,10 @@ type AgentRunSpec struct {
 	AgentRef string `json:"agentRef"`
 
 	// Gateway selects the Gateway (provider/model combination) for this
-	// run. Must be one of the gateways declared on the referenced Agent.
+	// run. When the referenced Agent declares gateways it must be one of
+	// them; when the Agent declares none, any Ready Gateway may be named.
+	// May be omitted only when the Agent declares exactly one gateway, which
+	// is then used by default.
 	// +optional
 	// +kubebuilder:validation:MinLength=1
 	Gateway string `json:"gateway,omitempty"`
