@@ -11,7 +11,7 @@ AgentRun to trigger execution.
   Kubernetes 1.33–1.34, so enable `ImageVolume` there; it is on by
   default from 1.35 and GA in 1.36)
 - [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
-  v0.5.x installed in the cluster
+  v1.0.x installed in the cluster
 - `kubectl` and `helm` configured to talk to the cluster
 - LLM provider credentials (e.g. GCP Vertex AI, OpenAI, Anthropic,
   AWS Bedrock)
@@ -23,15 +23,18 @@ Agent Sandbox must be installed before the controller can execute
 AgentRuns.
 
 ```bash
-AGENT_SANDBOX_TAG=v0.5.5
+AGENT_SANDBOX_TAG=v1.0.0
 
 # Clone and install via Helm
 git clone --depth 1 --branch $AGENT_SANDBOX_TAG \
   https://github.com/kubernetes-sigs/agent-sandbox.git /tmp/agent-sandbox
 
+# The chart renders its own Namespace by default; disable it with
+# namespace.create=false so it does not collide with --create-namespace.
 helm install agent-sandbox /tmp/agent-sandbox/helm/ \
   --namespace agent-sandbox-system \
   --create-namespace \
+  --set namespace.create=false \
   --set image.tag=$AGENT_SANDBOX_TAG
 
 # Wait for the controller to be ready
@@ -49,6 +52,21 @@ kubectl wait deployment/agent-sandbox-controller \
 > cluster with them). Note also that the release assets were renamed at
 > v0.5.2 (`manifest.yaml` → `sandbox.yaml`), so pin a v0.5.2+ tag if you
 > follow the release-manifest path.
+
+> **Upgrading an existing cluster:** Agent Sandbox v1.0.0 removes the
+> legacy `v1alpha1` API and its conversion webhooks, so you **cannot**
+> jump straight to it from v0.4.x / early v0.5.x. Follow the upstream
+> [v1.0.0 API migration guide](https://github.com/kubernetes-sigs/agent-sandbox/blob/v1.0.0/docs/api-migration-guide.md)
+> in order: (1) upgrade to a v0.5.x release; (2) run the
+> [v0.5 storage migration](https://github.com/kubernetes-sigs/agent-sandbox/blob/v0.5.2/docs/api-migration-guide.md)
+> to move all resources to `v1beta1` and prune legacy `storedVersions`;
+> (3) verify every agent-sandbox CRD reports only `["v1beta1"]` in
+> `status.storedVersions` (the apiserver rejects the upgrade otherwise);
+> (4) upgrade to v1.0.0. Because Helm does **not** upgrade CRDs in a
+> chart's `crds/` directory, apply the v1beta1 CRDs
+> (`kubectl apply -f helm/crds/`) *before* `helm upgrade` — otherwise the
+> chart removes the conversion-webhook Service while the old CRDs still
+> reference it. Fresh installs (the command above) are unaffected.
 
 > **Future:** [OpenShell](https://github.com/NVIDIA/OpenShell) will
 > replace the direct Agent Sandbox dependency. When integrated, the
