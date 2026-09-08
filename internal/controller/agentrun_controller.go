@@ -318,6 +318,18 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 		message, err := r.validateFileMountSources(ctx, &run)
 		if err != nil {
+			// User sources may arrive after the run, or lag in the informer
+			// cache. Keep the immutable run recoverable and retry with backoff,
+			// just as we do for a missing Gateway. User source watches do not
+			// enqueue this run, so returning the error drives the retry.
+			reason := "FileMountSourceUnavailable"
+			if errors.IsNotFound(err) {
+				reason = "FileMountSourceNotFound"
+			}
+			setRunSucceeded(&run, metav1.ConditionUnknown, reason, err.Error())
+			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
 			return ctrl.Result{}, err
 		}
 		if message != "" {
@@ -519,14 +531,14 @@ func (r *AgentRunReconciler) validateGateway(
 
 // validateFileMounts rejects file mounts that would break the pod: a
 // source that is neither (or both) Secret and ConfigMap, a non-absolute
-// path, duplicate cleaned mount paths, or a mountPath that collides
-// with a reserved mount (reservedMountPaths). These are permanent config errors, so the caller
+// path, invalid items paths, or mount paths that overlap each other or
+// a reserved mount (reservedMountPaths). These are permanent config errors, so the caller
 // fails the run terminally with InvalidFileMounts rather than requeuing.
 // The apiserver already enforces the xor rule (CEL) and mountPath
 // uniqueness (listMapKey); this re-checks defensively and owns the
 // collision rule, which CEL cannot express against Go-side constants.
 func validateFileMounts(mounts []konveyoriov1alpha1.FileMount) error {
-	seen := make(map[string]struct{}, len(mounts))
+	seen := make([]string, 0, len(mounts))
 	for _, m := range mounts {
 		if (m.SecretName == "") == (m.ConfigMapName == "") {
 			return fmt.Errorf("file mount at %q must set exactly one of secretName or configMapName", m.MountPath)
@@ -535,10 +547,20 @@ func validateFileMounts(mounts []konveyoriov1alpha1.FileMount) error {
 			return fmt.Errorf("file mount path %q must be absolute", m.MountPath)
 		}
 		clean := path.Clean(m.MountPath)
-		if _, exists := seen[clean]; exists {
-			return fmt.Errorf("file mount path %q duplicates mount path %q after cleaning", m.MountPath, clean)
+		for _, previous := range seen {
+			if pathsCollide(clean, previous) {
+				return fmt.Errorf("file mount path %q collides with file mount %q", m.MountPath, previous)
+			}
 		}
-		seen[clean] = struct{}{}
+		seen = append(seen, clean)
+		for _, item := range m.Items {
+			if item.Path == "" {
+				return fmt.Errorf("file mount at %q: items path must not be empty", m.MountPath)
+			}
+			if err := validateFileMountRelativePath(item.Path); err != nil {
+				return fmt.Errorf("file mount at %q: items path %q %w", m.MountPath, item.Path, err)
+			}
+		}
 		for _, reserved := range reservedMountPaths {
 			if pathsCollide(clean, reserved) {
 				return fmt.Errorf("file mount path %q collides with reserved mount %q", m.MountPath, reserved)
@@ -549,7 +571,8 @@ func validateFileMounts(mounts []konveyoriov1alpha1.FileMount) error {
 }
 
 // validateFileMountSources returns a terminal validation message for missing
-// sources or projected paths, and an error for API failures that must be retried.
+// projected paths, and an error for source lookups that must be retried,
+// including NotFound: the source may be applied after the run.
 // This preflight checks keys only; source values remain opaque. It cannot
 // prevent a source from changing between validation and the kubelet mounting it.
 func (r *AgentRunReconciler) validateFileMountSources(ctx context.Context, run *konveyoriov1alpha1.AgentRun) (string, error) {
@@ -563,10 +586,8 @@ func (r *AgentRunReconciler) validateFileMountSources(ctx context.Context, run *
 			source = &corev1.ConfigMap{}
 		}
 		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: name}, source); err != nil {
-			if errors.IsNotFound(err) {
-				return fmt.Sprintf("file mount at %q: %s %q not found in namespace %q", m.MountPath, kind, name, run.Namespace), nil
-			}
-			return "", fmt.Errorf("checking file mount %s %q: %w", kind, name, err)
+			return "", fmt.Errorf("file mount at %q from %s %q in namespace %q: %w",
+				m.MountPath, kind, name, run.Namespace, err)
 		}
 		keys := make(map[string]struct{})
 		switch obj := source.(type) {
@@ -606,11 +627,8 @@ func validateFileMountProjection(m konveyoriov1alpha1.FileMount, keys map[string
 	if m.SubPath == "" {
 		return nil
 	}
-	if path.IsAbs(m.SubPath) {
-		return fmt.Errorf("subPath %q must be relative", m.SubPath)
-	}
-	if slices.Contains(strings.Split(m.SubPath, "/"), "..") {
-		return fmt.Errorf("subPath %q must not contain '..'", m.SubPath)
+	if err := validateFileMountRelativePath(m.SubPath); err != nil {
+		return fmt.Errorf("subPath %q %w", m.SubPath, err)
 	}
 	subPath := path.Clean(m.SubPath)
 	if subPath == "." {
@@ -622,6 +640,18 @@ func validateFileMountProjection(m konveyoriov1alpha1.FileMount, keys map[string
 		}
 	}
 	return fmt.Errorf("subPath %q not found in projected files", m.SubPath)
+}
+
+// validateFileMountRelativePath rejects absolute paths and traversal before
+// cleaning, so normalization cannot hide an invalid segment.
+func validateFileMountRelativePath(p string) error {
+	if path.IsAbs(p) {
+		return fmt.Errorf("must be relative")
+	}
+	if slices.Contains(strings.Split(p, "/"), "..") {
+		return fmt.Errorf("must not contain '..'")
+	}
+	return nil
 }
 
 // pathsCollide reports whether two absolute, cleaned paths conflict as

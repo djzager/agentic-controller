@@ -99,8 +99,10 @@ type ParamValue struct {
 // Exactly one of SecretName or ConfigMapName must be set. MountPath is
 // rejected at run creation if it lands on, under, or above a
 // controller-managed mount (/opt/skills, /opt/skills-src, /run/konveyor,
-// /workspace, /tmp) or the Kubernetes service-account token mount. Missing
-// sources, items keys, or subPaths fail the run with InvalidFileMounts.
+// /workspace, /tmp), the Kubernetes service-account token mount, or another
+// user mount. Invalid paths and missing items keys or subPaths fail the run
+// with InvalidFileMounts. Missing sources are retried with Succeeded=Unknown
+// and reason FileMountSourceNotFound, allowing apply-order races to recover.
 // +kubebuilder:validation:XValidation:rule="has(self.secretName) != has(self.configMapName)",message="exactly one of secretName or configMapName must be set"
 type FileMount struct {
 	// SecretName names a Secret in the same namespace to mount. Mutually
@@ -119,7 +121,7 @@ type FileMount struct {
 	// content is mounted. When SubPath is empty the whole object is
 	// mounted as a directory here (one file per key); when SubPath is set
 	// MountPath is the file path a single key lands at. Must not collide
-	// with a reserved mount or duplicate another mount after path cleaning.
+	// with a reserved mount or overlap another mount after path cleaning.
 	// The cleaned path is used in the Sandbox.
 	// +kubebuilder:validation:MinLength=1
 	MountPath string `json:"mountPath"`
