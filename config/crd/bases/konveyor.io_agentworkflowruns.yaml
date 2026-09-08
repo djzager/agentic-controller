@@ -280,13 +280,14 @@ spec:
                     spec.envFrom: use it for config or credentials a skill or tool reads
                     from a path (e.g. a config file, a service-account JSON) rather than
                     from an environment variable. The controller passes the source through
-                    as an opaque Kubernetes primitive — it never reads or interprets the
-                    contents.
+                    as a Kubernetes primitive. Before creating the Sandbox it checks source
+                    existence and projected keys, without interpreting their values.
 
                     Exactly one of SecretName or ConfigMapName must be set. MountPath is
                     rejected at run creation if it lands on, under, or above a
                     controller-managed mount (/opt/skills, /opt/skills-src, /run/konveyor,
-                    /workspace, /tmp).
+                    /workspace, /tmp) or the Kubernetes service-account token mount. Missing
+                    sources, items keys, or subPaths fail the run with InvalidFileMounts.
                   properties:
                     configMapName:
                       description: |-
@@ -297,7 +298,7 @@ spec:
                     items:
                       description: |-
                         Items selects and optionally renames individual keys from the
-                        source object (directory mount). When empty, every key is projected
+                        source object. When empty, every key is projected
                         under MountPath using the key as the filename.
                       items:
                         description: Maps a string key to a path within a volume.
@@ -333,7 +334,8 @@ spec:
                         content is mounted. When SubPath is empty the whole object is
                         mounted as a directory here (one file per key); when SubPath is set
                         MountPath is the file path a single key lands at. Must not collide
-                        with a controller-managed mount.
+                        with a reserved mount or duplicate another mount after path cleaning.
+                        The cleaned path is used in the Sandbox.
                       minLength: 1
                       type: string
                     secretName:
@@ -346,7 +348,9 @@ spec:
                       description: |-
                         SubPath mounts a single key from the source object as a file at
                         MountPath instead of mounting the whole object as a directory. Its
-                        value is the key name within the Secret or ConfigMap.
+                        value is a path in the projected volume: a key name by default, or
+                        an Items path when keys are selected or renamed. Projected directories
+                        may also be mounted.
                       type: string
                   required:
                   - mountPath

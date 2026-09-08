@@ -878,6 +878,19 @@ var _ = Describe("AgentRun Controller", func() {
 		)
 
 		It("should mount the Secret and ConfigMap read-only on the agent container", func() {
+			mountSecret := &corev1.Secret{
+				ObjectMeta: metav1.ObjectMeta{Name: testMountSecretName, Namespace: testNamespace},
+				Data:       map[string][]byte{testMountKey: []byte("credentials")},
+			}
+			mountConfig := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: testMountCMName, Namespace: testNamespace},
+				BinaryData: map[string][]byte{"binary": {0, 1}},
+			}
+			Expect(k8sClient.Create(ctx, mountSecret)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, mountSecret)).To(Succeed()) })
+			Expect(k8sClient.Create(ctx, mountConfig)).To(Succeed())
+			DeferCleanup(func() { Expect(k8sClient.Delete(ctx, mountConfig)).To(Succeed()) })
+
 			cleanup := makeReadyGatewayKeyless(gwName, secretName)
 			defer cleanup()
 

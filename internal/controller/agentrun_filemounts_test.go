@@ -17,11 +17,20 @@ limitations under the License.
 package controller
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	sandboxv1beta1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	konveyoriov1alpha1 "github.com/konveyor/agentic-controller/api/v1alpha1"
 )
@@ -29,13 +38,15 @@ import (
 // Shared file-mount test fixtures, kept as constants so goconst stays
 // quiet across the controller package's test files.
 const (
-	testMountSecretPath = "/etc/jira/config.yaml"
-	testMountCMPath     = "/etc/app"
-	testMountBadPath    = "/etc/x"
-	testFileMountAgent  = "some-agent"
-	testMountCMName     = "app-config"
-	testMountKey        = "config.yaml"
-	testMountSecretName = "jira-creds"
+	testMountSecretPath   = "/etc/jira/config.yaml"
+	testMountCMPath       = "/etc/app"
+	testMountBadPath      = "/etc/x"
+	testFileMountAgent    = "some-agent"
+	testMountCMName       = "app-config"
+	testMountKey          = "config.yaml"
+	testMountSecretName   = "jira-creds"
+	testMountLookupError  = "lookup error"
+	testMountSecretSource = "secret"
 )
 
 func TestValidateFileMountsAcceptsValidMounts(t *testing.T) {
@@ -79,14 +90,17 @@ func TestValidateFileMountsRejectsRelativePath(t *testing.T) {
 // mount — each would shadow the skills root, params.json, or workspace.
 func TestValidateFileMountsRejectsReservedCollisions(t *testing.T) {
 	tests := map[string]string{
-		"exact skills root":   skillsDir,
-		"under skills root":   "/opt/skills/evil",
-		"exact params dir":    "/run/konveyor",
-		"under params dir":    ParamsFilePath,
-		"exact workspace":     "/workspace",
-		"under tmp":           "/tmp/foo",
-		"ancestor of a mount": "/opt", // /opt contains /opt/skills
-		"root contains all":   "/",
+		"service account token": "/var/run/secrets/kubernetes.io/serviceaccount",
+		"token ancestor":        "/var/run/secrets",
+		"token child":           "/var/run/secrets/kubernetes.io/serviceaccount/token",
+		"exact skills root":     skillsDir,
+		"under skills root":     "/opt/skills/evil",
+		"exact params dir":      "/run/konveyor",
+		"under params dir":      ParamsFilePath,
+		"exact workspace":       "/workspace",
+		"under tmp":             "/tmp/foo",
+		"ancestor of a mount":   "/opt", // /opt contains /opt/skills
+		"root contains all":     "/",
 	}
 	for name, mountPath := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -149,7 +163,7 @@ func TestFileMountVolumesBuildsSecretAndConfigMapSources(t *testing.T) {
 				},
 				{
 					ConfigMapName: testMountCMName,
-					MountPath:     testMountCMPath,
+					MountPath:     testMountCMPath + "/./",
 				},
 			},
 		},
@@ -194,5 +208,144 @@ func TestFileMountVolumesBuildsSecretAndConfigMapSources(t *testing.T) {
 	}
 	if !mounts[1].ReadOnly {
 		t.Error("mount 1 is not read-only")
+	}
+}
+
+func TestValidateFileMountsRejectsEquivalentPaths(t *testing.T) {
+	for _, other := range []string{testMountCMPath, testMountCMPath + "/", "/etc/other/../app"} {
+		t.Run(other, func(t *testing.T) {
+			err := validateFileMounts([]konveyoriov1alpha1.FileMount{
+				{SecretName: "s", MountPath: testMountCMPath},
+				{ConfigMapName: "c", MountPath: other},
+			})
+			if err == nil {
+				t.Fatal("equivalent mount paths accepted")
+			}
+		})
+	}
+}
+
+func TestReconcileInvalidFileMountSources(t *testing.T) {
+	for _, source := range []string{testMountSecretSource, "configmap"} {
+		for _, scenario := range []string{"missing source", "missing item", "missing subPath", "unselected subPath", testMountLookupError} {
+			t.Run(source+"/"+scenario, func(t *testing.T) {
+				ctx := context.Background()
+				scheme := runtime.NewScheme()
+				for _, add := range []func(*runtime.Scheme) error{corev1.AddToScheme, konveyoriov1alpha1.AddToScheme, sandboxv1beta1.AddToScheme} {
+					if err := add(scheme); err != nil {
+						t.Fatal(err)
+					}
+				}
+				agent := &konveyoriov1alpha1.Agent{
+					ObjectMeta: metav1.ObjectMeta{Name: "agent", Namespace: testNamespace},
+					Spec:       konveyoriov1alpha1.AgentSpec{Gateways: []konveyoriov1alpha1.AgentGatewayRef{{Ref: "gateway"}}},
+					Status:     konveyoriov1alpha1.AgentStatus{Conditions: []metav1.Condition{{Type: ConditionTypeReady, Status: metav1.ConditionTrue}}},
+				}
+				mount := konveyoriov1alpha1.FileMount{MountPath: testMountCMPath}
+				if source == testMountSecretSource {
+					mount.SecretName = testMountCMName
+				} else {
+					mount.ConfigMapName = testMountCMName
+				}
+				switch scenario {
+				case "missing item":
+					mount.Items = []corev1.KeyToPath{{Key: "absent", Path: "file"}}
+				case "missing subPath":
+					mount.SubPath = "absent"
+				case "unselected subPath":
+					mount.Items = []corev1.KeyToPath{{Key: testMountKey, Path: "renamed"}}
+					mount.SubPath = testMountKey
+				}
+				run := &konveyoriov1alpha1.AgentRun{
+					ObjectMeta: metav1.ObjectMeta{Name: "filemount-run", Namespace: testNamespace},
+					Spec:       konveyoriov1alpha1.AgentRunSpec{AgentRef: agent.Name, FileMounts: []konveyoriov1alpha1.FileMount{mount}},
+				}
+				gateway := &konveyoriov1alpha1.Gateway{
+					ObjectMeta: metav1.ObjectMeta{Name: "gateway", Namespace: testNamespace},
+					Status:     konveyoriov1alpha1.GatewayStatus{Conditions: []metav1.Condition{{Type: ConditionTypeReady, Status: metav1.ConditionTrue}}},
+				}
+				objects := []client.Object{agent, run, gateway}
+				if scenario != "missing source" {
+					objects = append(objects,
+						&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testMountCMName, Namespace: testNamespace}, Data: map[string][]byte{testMountKey: []byte("private-value")}},
+						&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: testMountCMName, Namespace: testNamespace}, Data: map[string]string{testMountKey: "private-value"}},
+					)
+				}
+				c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(run).WithObjects(objects...).
+					WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						if scenario == testMountLookupError && key.Name == testMountCMName {
+							return fmt.Errorf("API unavailable")
+						}
+						return c.Get(ctx, key, obj, opts...)
+					}}).Build()
+				r := &AgentRunReconciler{Client: c, Scheme: scheme}
+				_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(run)})
+				if scenario == testMountLookupError {
+					if err == nil || !strings.Contains(err.Error(), "API unavailable") {
+						t.Fatalf("expected retryable lookup error, got %v", err)
+					}
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.Get(ctx, client.ObjectKeyFromObject(run), run); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == testMountLookupError {
+					if run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseFailed {
+						t.Fatal("lookup error failed run terminally")
+					}
+				} else {
+					cond := meta.FindStatusCondition(run.Status.Conditions, konveyoriov1alpha1.AgentRunConditionSucceeded)
+					if run.Status.Phase != konveyoriov1alpha1.AgentRunPhaseFailed || cond == nil || cond.Reason != "InvalidFileMounts" || cond.Status != metav1.ConditionFalse {
+						t.Fatalf("expected terminal InvalidFileMounts, got %+v", run.Status)
+					}
+					if strings.Contains(cond.Message, "private-value") {
+						t.Fatal("source value leaked into status")
+					}
+				}
+				var sandboxes sandboxv1beta1.SandboxList
+				if err := c.List(ctx, &sandboxes); err != nil {
+					t.Fatal(err)
+				}
+				if len(sandboxes.Items) != 0 {
+					t.Fatal("created Sandbox for invalid file mounts")
+				}
+			})
+		}
+	}
+}
+
+func TestValidateFileMountSourcesAcceptsProjectedPaths(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: testMountCMName, Namespace: testNamespace}, Data: map[string][]byte{testMountKey: []byte("private")}},
+		&corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: testMountCMName, Namespace: testNamespace}, BinaryData: map[string][]byte{testMountKey: {0, 1}}},
+	).Build()
+	r := &AgentRunReconciler{Client: c}
+	for _, source := range []string{testMountSecretSource, "configmap"} {
+		for _, subPath := range []string{"", testMountKey, "nested/renamed", "nested"} {
+			t.Run(source+"/"+subPath, func(t *testing.T) {
+				mount := konveyoriov1alpha1.FileMount{MountPath: testMountCMPath, SubPath: subPath}
+				if source == testMountSecretSource {
+					mount.SecretName = testMountCMName
+				} else {
+					mount.ConfigMapName = testMountCMName
+				}
+				if strings.HasPrefix(subPath, "nested") {
+					mount.Items = []corev1.KeyToPath{{Key: testMountKey, Path: "nested/renamed"}}
+				}
+				run := &konveyoriov1alpha1.AgentRun{
+					ObjectMeta: metav1.ObjectMeta{Namespace: testNamespace},
+					Spec:       konveyoriov1alpha1.AgentRunSpec{FileMounts: []konveyoriov1alpha1.FileMount{mount}},
+				}
+				message, err := r.validateFileMountSources(context.Background(), run)
+				if err != nil || message != "" {
+					t.Fatalf("valid projection rejected: %s, %v", message, err)
+				}
+			})
+		}
 	}
 }
