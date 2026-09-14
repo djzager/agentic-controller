@@ -1,0 +1,5 @@
+kind: bugfix
+description: >
+  Add the Hub managed label to the three default Agents and the default
+  AgentWorkflow so they appear in the UI catalogs, while preserving the
+  operator label used for pruning.
