@@ -6,6 +6,9 @@ on:
 
 permissions: {}
 
+env:
+  GOFIPS140: v1.0.0
+
 jobs:
   test:
     permissions:

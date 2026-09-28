@@ -58,6 +58,7 @@ FROM ${GOOSE_IMAGE} AS goose
 
 # --- Build stage ---
 FROM golang:1.26 AS builder
+ENV GOFIPS140=v1.0.0
 
 # The harness replaces github.com/konveyor/agentic-controller/api with ../api,
 # so that module has to be in the image at the path the replace names, laid out

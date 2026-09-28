@@ -1,5 +1,6 @@
 # Build the manager binary
 FROM golang:1.26.6 AS builder
+ENV GOFIPS140=v1.0.0
 ARG TARGETOS
 ARG TARGETARCH
 

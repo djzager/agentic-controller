@@ -1,0 +1,5 @@
+kind: bugfix
+
+description: >
+  Build the controller, skill-loader, and migration harness with the validated
+  Go Cryptographic Module v1.0.0 and FIPS mode enabled by default.
