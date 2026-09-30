@@ -23,7 +23,7 @@ The recording has two halves, each behind a black part card:
 
 | Time | On screen | Say |
 | --- | --- | --- |
-| 0:00 | Part card | "A hub with agents on. The operator installed three agents, a workflow and their skills; an admin added a gateway to Claude; coolstore is registered and analyzed. From here, one workflow run." |
+| 0:00 | Part card | "A hub with agents on. The operator installed the agents, the workflow and their skills. An admin created a Gateway, the object that points a run at a model, here Claude on Bedrock. Coolstore is registered and analyzed. From here, one workflow run." |
 | 0:09 | Create workflow run dialog, then the run page | "A run is three choices: which workflow, which gateway, which application. Create, and the controller starts the first stage in its own sandbox." |
 | 0:26 | Plan stage, live session | "Plan is an agent with one job: read the analysis and the source, write docs/plan.md. That file is the contract for the next stage. You are watching its live session, not a summary after the fact." |
 | 0:53 | Execute stage | "Execute is a different agent in a fresh sandbox. It gets the plan, not the planner's memory, and works through the steps, recording what it did in a handoff file." |
