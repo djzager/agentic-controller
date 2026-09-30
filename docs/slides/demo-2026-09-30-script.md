@@ -9,12 +9,15 @@ The recording has two halves, each behind a black part card:
 
 1. One run of the `java-ee-to-quarkus` workflow against coolstore, from
    Create workflow run to the branch and the handoff report. Footage from a
-   run on a Konveyor 0.11 hub with the downstream console.
+   run on a Konveyor 0.11 hub with the downstream UI.
 2. The same workflow with `spec.execution.askUser: true` on its plan stage
    and instructions that hand the datasource decision to a human. Footage
-   from a later run on the same cluster with a console built from
-   `release-0.11` plus konveyor/tackle2-ui#3625, and a hub built from
-   `release-0.11` plus konveyor/tackle2-hub#1143, so the field round-trips.
+   from a later run on the same cluster with three things switched on:
+   steering for the UI through the operator (`agentic_steer_enabled` on the
+   Tackle CR, which sets `AGENTIC_STEER_ENABLED` on the UI deployment), a UI
+   built from `release-0.11` plus konveyor/tackle2-ui#3625, and a hub built
+   from `release-0.11` plus konveyor/tackle2-hub#1143, so the `askUser`
+   field round-trips.
 
 ## Part 1: One workflow run, on a real application
 
