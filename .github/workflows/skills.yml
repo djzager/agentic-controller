@@ -1,18 +1,19 @@
-name: Build and Push Skills
+name: Validate and Build Skills
+
+# PR-time validation and build check for the skill bundle. The versioned
+# build+push lives in image-build-push.yml (filter-free so tag pushes fire).
 
 on:
-  push:
-    branches: [main]
   pull_request:
   workflow_dispatch: {}
 
 permissions: {}
 
 jobs:
-  build-and-push:
+  validate-and-build:
     permissions:
       contents: read
-    name: Build and push the skill bundle
+    name: Validate and build the skill bundle
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -33,15 +34,3 @@ jobs:
 
       - name: Build skill bundle
         run: make skill-build
-
-      - name: Log in to Quay.io
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
-        with:
-          registry: quay.io
-          username: ${{ vars.QUAY_USERNAME }}
-          password: ${{ secrets.QUAY_PASSWORD }}
-
-      - name: Push skill bundle
-        if: github.event_name != 'pull_request'
-        run: make skill-push

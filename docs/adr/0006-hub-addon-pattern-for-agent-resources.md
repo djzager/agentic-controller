@@ -1,3 +1,18 @@
+---
+adr: "0006"
+title: "Hub follows the addon pattern for agent resources"
+description: "Defines Hub as a fire-and-forget CRUD and runtime data service that follows the existing addon integration boundary."
+status: proposed
+status_note: "Supersedes ADR 0003; Hub-specific integration remains external to this repository."
+date: "2026-07-23"
+last_updated: "2026-08-31"
+authors:
+  - "David Zager"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Remains proposed/external to this repository. The Hub addon pattern is still the intended integration boundary; the entry point now receives parameters through params.json, as recorded in the ADR amendment."
+---
+
 # ADR 0006: Hub follows the addon pattern for agent resources
 
 Hub's integration with the agent platform follows the established addon
@@ -7,8 +22,13 @@ scoped API token injected as env/envFrom — then walks away
 (fire-and-forget). The harness resolves application metadata from Hub at
 runtime, the same way the addon adapter does for addon tasks today.
 
-**Status:** proposed — supersedes ADR 0003
-**Date:** 2026-07-23
+**Update (2026-08-31):** The entry point no longer has a standalone
+`KONVEYOR_PARAM_*` parameter-delivery path. Resolved workflow and Agent
+parameters are delivered through `/run/konveyor/params.json` under the
+`workflow` and `agent` sections (ADR 0009); environment variables remain the
+carrier for runtime credentials and execution metadata. Hub integration is
+outside this repository, so the Hub-specific portions of this ADR remain
+proposed.
 
 ## Context
 

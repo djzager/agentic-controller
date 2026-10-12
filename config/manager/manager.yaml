@@ -7,6 +7,11 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
   name: system
 ---
+# The operator ships its own rendering of this Deployment as a Jinja template,
+# config/operator/deployment.yaml.j2, synced by hack/sync-operator.sh. It is a
+# hand-maintained mirror of this container spec (command, args, env, ports,
+# probes, securityContext, resources) -- when either changes, update both.
+# internal/manifests/deployment_parity_test.go fails the build if they drift.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

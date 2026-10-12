@@ -1,0 +1,7 @@
+kind: enhancement
+description: >
+  Surface the cause of a failed Gateway connectivity check on the Gateway
+  status. The verification probe now records the HTTP status code or transport
+  error, and the controller reports a specific Ready-condition reason
+  (AuthenticationFailed for HTTP 401/403, EndpointUnreachable for connection
+  errors, ConnectionFailed for other non-2xx) with a descriptive message.

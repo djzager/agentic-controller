@@ -674,6 +674,51 @@ func TestHarnessStatusEmitAndReplay(t *testing.T) {
 	v.expect("live tool_call", func(f string) bool { return strings.Contains(f, "harness-push-1") })
 }
 
+// TestLateViewerLearnsHowTheRunEnded is the end-to-end form of the replay
+// guarantee: a viewer that attaches to a finished, busy run is told the
+// ladder and the outcome, not only the last handful of pushes. Nothing
+// covered the late-attach path before, which is how the outcome came to
+// depend on being the last thing emitted.
+func TestLateViewerLearnsHowTheRunEnded(t *testing.T) {
+	_, _, s := startTee(t, Config{})
+
+	s.EmitRunUpdate(map[string]any{
+		"sessionUpdate": "plan",
+		"entries": []map[string]any{
+			{"content": "Prepare workspace", "priority": "medium", "status": "completed"},
+			{"content": "Agent works the task", "priority": "medium", "status": "completed"},
+			{"content": "Push results to branch main", "priority": "medium", "status": "completed"},
+		},
+	})
+	s.EmitRunOutcome("stage succeeded — results pushed to branch main")
+	// A busy tail: far more push traffic than the ring can hold, all of
+	// it after the outcome.
+	for i := 0; i < 3*replayCap; i++ {
+		id := fmt.Sprintf("harness-push-%d", i)
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": id,
+			"title": "git push to branch main (auto-commit watcher)",
+			"kind":  "execute", "status": "in_progress",
+		})
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed",
+		})
+	}
+
+	v, err := dialViewer(t, s, testKey)
+	if err != nil {
+		t.Fatalf("viewer dial: %v", err)
+	}
+	plan := v.expect("replayed plan", func(f string) bool { return strings.Contains(f, `"sessionUpdate":"plan"`) })
+	if !strings.Contains(plan, "Push results to branch main") {
+		t.Fatalf("bad replayed plan frame: %s", plan)
+	}
+	outcome := v.expect("replayed outcome", func(f string) bool { return strings.Contains(f, "status_message") })
+	if !strings.Contains(outcome, "stage succeeded — results pushed to branch main") {
+		t.Fatalf("late viewer was not told how the run ended: %s", outcome)
+	}
+}
+
 func TestUpstreamDialCarriesHeaderNotURL(t *testing.T) {
 	g, _, s := startTee(t, Config{})
 
@@ -885,5 +930,440 @@ func TestStopStaysBoundedWithStalledViewers(t *testing.T) {
 	case <-done:
 	case <-time.After(shutdownFlushTimeout + 5*time.Second):
 		t.Fatal("Stop exceeded its flush budget — a later viewer waited with no deadline")
+	}
+}
+
+// The agent's question (elicitation/create) rides the same relay as a
+// permission ask under a kask-<n> id; a viewer that attaches while the
+// question is still waiting receives it on attach, and its answer is
+// relayed verbatim.
+func TestForwardElicitationAndLateViewerReplay(t *testing.T) {
+	_, _, s := startTee(t, Config{HITLTimeout: 2 * time.Second})
+
+	params := json.RawMessage(`{"sessionId":"s1","mode":"form","message":"Which database?",` +
+		`"requestedSchema":{"type":"object","properties":{"answer":{"type":"string","enum":["postgres","mysql"]}},"required":["answer"]}}`)
+
+	// Nobody attached: fail closed immediately.
+	if _, outcome := s.ForwardElicitation(params); outcome != acp.ForwardNoViewers {
+		t.Fatalf("expected NoViewers, got %v", outcome)
+	}
+
+	first, err := dialViewer(t, s, testKey)
+	if err != nil {
+		t.Fatalf("viewer dial: %v", err)
+	}
+
+	type fwdOut struct {
+		result  json.RawMessage
+		outcome acp.PermissionForwardOutcome
+	}
+	done := make(chan fwdOut, 1)
+	go func() {
+		r, o := s.ForwardElicitation(params)
+		done <- fwdOut{r, o}
+	}()
+
+	ask := first.expect("forwarded question", func(f string) bool { return strings.Contains(f, "kask-") })
+	var askFrame struct {
+		ID     string          `json:"id"`
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal([]byte(ask), &askFrame); err != nil {
+		t.Fatalf("ask frame: %v", err)
+	}
+	if askFrame.Method != "elicitation/create" || !strings.HasPrefix(askFrame.ID, "kask-") {
+		t.Fatalf("bad ask frame: %s", ask)
+	}
+	if string(askFrame.Params) != string(params) {
+		t.Fatalf("params altered: %s", askFrame.Params)
+	}
+
+	// A second viewer arrives while the question waits: it must see the
+	// pending ask on attach (the harness ring alone would not carry it).
+	late, err := dialViewer(t, s, testKey)
+	if err != nil {
+		t.Fatalf("late viewer dial: %v", err)
+	}
+	replayed := late.expect("replayed question", func(f string) bool { return strings.Contains(f, askFrame.ID) })
+	if !strings.Contains(replayed, `"elicitation/create"`) {
+		t.Fatalf("late viewer did not get the pending question: %s", replayed)
+	}
+
+	// The late viewer answers; the result is relayed verbatim and the
+	// first viewer's pipe never sees it.
+	answer := fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"result":{"action":"accept","content":{"answer":"postgres"}}}`, askFrame.ID)
+	if err := late.conn.WriteMessage(websocket.TextMessage, []byte(answer)); err != nil {
+		t.Fatalf("answer write: %v", err)
+	}
+	out := <-done
+	if out.outcome != acp.ForwardAnswered {
+		t.Fatalf("expected Answered, got %v", out.outcome)
+	}
+	if !strings.Contains(string(out.result), `"answer":"postgres"`) {
+		t.Fatalf("answer not relayed: %s", out.result)
+	}
+
+	// Once answered, a fresh viewer is not shown the stale question.
+	third, err := dialViewer(t, s, testKey)
+	if err != nil {
+		t.Fatalf("third viewer dial: %v", err)
+	}
+	select {
+	case f := <-third.recv:
+		if strings.Contains(f, askFrame.ID) {
+			t.Fatalf("answered question replayed to a later viewer: %s", f)
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// resolveAsk must remove the pending replay frame in the same critical
+// section that commits the answer. forwardAsk's deferred cleanup runs
+// only after the parked goroutine wakes, so a viewer attaching in that
+// gap would otherwise be offered an already-answered question whose
+// reply then vanishes as "late/duplicate" with no feedback.
+func TestResolveAskClearsPendingFrameWithAnswer(t *testing.T) {
+	_, _, s := startTee(t, Config{HITLTimeout: time.Second})
+
+	ch := make(chan json.RawMessage, 1)
+	s.mu.Lock()
+	s.perms["kask-9"] = ch
+	s.pendingAsks["kask-9"] = []byte(`{"id":"kask-9"}`)
+	s.mu.Unlock()
+
+	s.resolveAsk("kask-9", json.RawMessage(`{"action":"accept"}`))
+
+	s.mu.Lock()
+	_, stillPending := s.pendingAsks["kask-9"]
+	s.mu.Unlock()
+	if stillPending {
+		t.Fatal("answered ask still in pendingAsks — a viewer attaching now would be offered a dead question")
+	}
+	select {
+	case r := <-ch:
+		if !strings.Contains(string(r), "accept") {
+			t.Fatalf("wrong answer delivered: %s", r)
+		}
+	default:
+		t.Fatal("answer never delivered to the waiting forwardAsk")
+	}
+}
+
+// When an ask concludes, the tee broadcasts a resolution frame keyed by
+// the ask id so a viewer's question/permission card closes instead of
+// stranding in its answer/decline state: a cancel body on timeout, and the
+// chosen answer for the OTHER viewers when one of them answered.
+func TestAskResolutionClosesCard(t *testing.T) {
+	params := json.RawMessage(`{"sessionId":"s1","message":"Which database?","requestedSchema":{"type":"object"}}`)
+
+	t.Run("timeout emits a cancel resolution", func(t *testing.T) {
+		_, _, s := startTee(t, Config{HITLTimeout: 200 * time.Millisecond})
+		v, err := dialViewer(t, s, testKey)
+		if err != nil {
+			t.Fatalf("viewer dial: %v", err)
+		}
+		go s.ForwardElicitation(params)
+
+		ask := v.expect("forwarded question", func(f string) bool { return strings.Contains(f, "kask-") })
+		id := frameID(t, ask)
+
+		res := v.expect("resolution frame", func(f string) bool { return isResolution(f, id) })
+		if !strings.Contains(res, `"cancel"`) {
+			t.Fatalf("timeout resolution should carry cancel: %s", res)
+		}
+	})
+
+	t.Run("an answer resolves the card for other viewers", func(t *testing.T) {
+		_, _, s := startTee(t, Config{HITLTimeout: 5 * time.Second})
+		a, err := dialViewer(t, s, testKey)
+		if err != nil {
+			t.Fatalf("viewer A dial: %v", err)
+		}
+		b, err := dialViewer(t, s, testKey)
+		if err != nil {
+			t.Fatalf("viewer B dial: %v", err)
+		}
+		done := make(chan struct{})
+		go func() { s.ForwardElicitation(params); close(done) }()
+
+		ask := a.expect("A sees question", func(f string) bool { return strings.Contains(f, "kask-") })
+		id := frameID(t, ask)
+		b.expect("B sees question", func(f string) bool { return strings.Contains(f, id) })
+
+		answer := fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"result":{"action":"accept","content":{"answer":"postgres"}}}`, id)
+		if err := a.conn.WriteMessage(websocket.TextMessage, []byte(answer)); err != nil {
+			t.Fatalf("answer write: %v", err)
+		}
+		<-done
+
+		res := b.expect("B sees resolution", func(f string) bool { return isResolution(f, id) })
+		if !strings.Contains(res, `"postgres"`) {
+			t.Fatalf("answered resolution should carry the chosen answer: %s", res)
+		}
+	})
+}
+
+// frameID extracts a string JSON-RPC id from a frame, failing the test if
+// absent.
+func frameID(t *testing.T, frame string) string {
+	t.Helper()
+	var f struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(frame), &f); err != nil || f.ID == "" {
+		t.Fatalf("no id in frame: %s (%v)", frame, err)
+	}
+	return f.ID
+}
+
+// isResolution reports whether frame is a JSON-RPC response (no method,
+// has a result) keyed by id — the shape emitAskResolution broadcasts.
+func isResolution(frame, id string) bool {
+	var f struct {
+		ID     string          `json:"id"`
+		Method string          `json:"method"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(frame), &f); err != nil {
+		return false
+	}
+	return f.Method == "" && f.ID == id && len(f.Result) > 0
+}
+
+// TestReplayKeepsOnlyLatestPlan proves a re-emitted plan ladder replaces
+// the earlier one in the replay ring instead of stacking up, while
+// unkeyed frames (pushes, notices) accumulate as before.
+func TestReplayKeepsOnlyLatestPlan(t *testing.T) {
+	s := New(Config{SecretKey: "k"})
+	s.runMu.Lock()
+	s.runSessionID = "run-1"
+	s.runMu.Unlock()
+
+	plan := func(status string) map[string]any {
+		return map[string]any{
+			"sessionUpdate": "plan",
+			"entries":       []map[string]any{{"content": "x", "status": status}},
+		}
+	}
+	s.EmitRunUpdate(plan("pending"))
+	s.EmitRunUpdate(map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "edit file"})
+	s.EmitRunUpdate(plan("in_progress"))
+	s.EmitRunNotice("stage succeeded")
+	s.EmitRunUpdate(plan("completed"))
+
+	s.mu.Lock()
+	replay := append([][]byte(nil), s.replay...)
+	s.mu.Unlock()
+	if len(replay) != 3 {
+		t.Fatalf("replay holds %d frames, want 3 (tool_call, notice, latest plan)", len(replay))
+	}
+	plans := 0
+	for _, f := range replay {
+		if strings.Contains(string(f), `"sessionUpdate":"plan"`) {
+			plans++
+			if !strings.Contains(string(f), `"status":"completed"`) {
+				t.Errorf("replayed plan is not the latest: %s", f)
+			}
+		}
+	}
+	if plans != 1 {
+		t.Errorf("replay holds %d plan frames, want 1", plans)
+	}
+	if !strings.Contains(string(replay[len(replay)-1]), `"sessionUpdate":"plan"`) {
+		t.Errorf("latest plan should sit at the tail of the replay, got %s", replay[len(replay)-1])
+	}
+}
+
+// TestReplayKeepsOutcomeWhateverFollowsIt pins the guarantee a late viewer
+// depends on: the line saying how the stage ended is in the replay ring
+// however many frames arrive afterwards. Today the outcome reaches a late
+// viewer only because emitOutcome happens to be the last call in
+// runStage — emit anything after it and the ring would drop it. An
+// ordinary notice stays unkeyed and is still evictable.
+func TestReplayKeepsOutcomeWhateverFollowsIt(t *testing.T) {
+	s := New(Config{SecretKey: "k"})
+	s.runMu.Lock()
+	s.runSessionID = "run-1"
+	s.runMu.Unlock()
+
+	s.EmitRunNotice("stage running")
+	s.EmitRunOutcome("stage succeeded — results pushed to branch main")
+	s.EmitRunUpdate(map[string]any{
+		"sessionUpdate": "plan",
+		"entries":       []map[string]any{{"content": "x", "status": "completed"}},
+	})
+	// Far more than replayCap, all after the outcome, and all unkeyed —
+	// plain agent tool calls, not the harness's own keyed pushes.
+	for i := 0; i < 200; i++ {
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": fmt.Sprintf("t%d", i), "title": "edit file",
+		})
+	}
+
+	s.mu.Lock()
+	replay := append([][]byte(nil), s.replay...)
+	s.mu.Unlock()
+
+	if len(replay) != replayCap {
+		t.Fatalf("replay holds %d frames, want %d", len(replay), replayCap)
+	}
+	outcomes, plans, notices := 0, 0, 0
+	for _, f := range replay {
+		switch {
+		case strings.Contains(string(f), "stage succeeded — results pushed to branch main"):
+			outcomes++
+		case strings.Contains(string(f), `"sessionUpdate":"plan"`):
+			plans++
+		case strings.Contains(string(f), "stage running"):
+			notices++
+		}
+	}
+	if outcomes != 1 {
+		t.Errorf("replay holds %d outcome frames, want 1 — a late viewer is not told how the run ended", outcomes)
+	}
+	if plans != 1 {
+		t.Errorf("replay holds %d plan frames, want 1", plans)
+	}
+	if notices != 0 {
+		t.Errorf("unkeyed notice survived %d evictions, want it evicted", notices)
+	}
+}
+
+// TestReplayKeepsOnlyLatestPush proves the auto-commit watcher cannot
+// flood the replay ring. A long run pushes dozens of times, two frames
+// each, and before this they were all unkeyed: a late viewer's catch-up
+// was a wall of identical "git push to branch X" cards that had already
+// evicted the plan ladder. Only the most recent push is news, so the pair
+// is keyed and every earlier push is superseded.
+//
+// Both frames of the pair must survive: the console resolves a
+// tool_call_update against the tool_call it already holds and drops it
+// when there is none, so replaying the result alone would show nothing.
+func TestReplayKeepsOnlyLatestPush(t *testing.T) {
+	s := New(Config{SecretKey: "k"})
+	s.runMu.Lock()
+	s.runSessionID = "run-1"
+	s.runMu.Unlock()
+
+	s.EmitRunUpdate(map[string]any{
+		"sessionUpdate": "plan",
+		"entries":       []map[string]any{{"content": "x", "status": "in_progress"}},
+	})
+	for i := 1; i <= 40; i++ {
+		id := fmt.Sprintf("harness-push-%d", i)
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": id,
+			"title": "Harness: git push to branch demo (auto-commit watcher)",
+			"kind":  "execute", "status": "in_progress",
+		})
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed",
+		})
+	}
+	s.EmitRunOutcome("stage succeeded — results pushed to branch demo")
+
+	s.mu.Lock()
+	replay := append([][]byte(nil), s.replay...)
+	s.mu.Unlock()
+
+	// plan + push tool_call + push tool_call_update + outcome.
+	if len(replay) != 4 {
+		t.Fatalf("replay holds %d frames, want 4:\n%s", len(replay), strings.Join(asStrings(replay), "\n"))
+	}
+	calls, updates := 0, 0
+	for _, f := range replay {
+		switch {
+		case strings.Contains(string(f), `"sessionUpdate":"tool_call"`):
+			calls++
+			if !strings.Contains(string(f), `"harness-push-40"`) {
+				t.Errorf("replayed push is not the latest: %s", f)
+			}
+		case strings.Contains(string(f), `"sessionUpdate":"tool_call_update"`):
+			updates++
+			if !strings.Contains(string(f), `"harness-push-40"`) {
+				t.Errorf("replayed push result is not the latest: %s", f)
+			}
+		}
+	}
+	if calls != 1 || updates != 1 {
+		t.Errorf("replay holds %d push calls and %d push results, want 1 each", calls, updates)
+	}
+}
+
+// TestReplayKeepsPushPairTogether: an in-flight push — the tool_call with
+// no result yet — must not be evicted by the ring filling up behind it,
+// or the console drops the result when it finally lands.
+func TestReplayKeepsPushPairTogether(t *testing.T) {
+	s := New(Config{SecretKey: "k"})
+	s.runMu.Lock()
+	s.runSessionID = "run-1"
+	s.runMu.Unlock()
+
+	s.EmitRunUpdate(map[string]any{
+		"sessionUpdate": "tool_call", "toolCallId": "harness-push-1",
+		"title": "Harness: git push to branch demo (auto-commit watcher)",
+		"kind":  "execute", "status": "in_progress",
+	})
+	// The push is slow; the agent keeps working while it runs.
+	for i := 0; i < 3*replayCap; i++ {
+		s.EmitRunUpdate(map[string]any{
+			"sessionUpdate": "tool_call", "toolCallId": fmt.Sprintf("t%d", i), "title": "edit file",
+		})
+	}
+	s.EmitRunUpdate(map[string]any{
+		"sessionUpdate": "tool_call_update", "toolCallId": "harness-push-1", "status": "completed",
+	})
+
+	s.mu.Lock()
+	replay := append([][]byte(nil), s.replay...)
+	s.mu.Unlock()
+
+	var sawCall, sawUpdate bool
+	for _, f := range replay {
+		if strings.Contains(string(f), `"harness-push-1"`) {
+			if strings.Contains(string(f), `"sessionUpdate":"tool_call_update"`) {
+				sawUpdate = true
+			} else {
+				sawCall = true
+			}
+		}
+	}
+	if !sawCall {
+		t.Error("the push's opening tool_call was evicted — the console will drop its result")
+	}
+	if !sawUpdate {
+		t.Error("the push's result is missing from the replay")
+	}
+}
+
+func asStrings(frames [][]byte) []string {
+	out := make([]string, len(frames))
+	for i, f := range frames {
+		out[i] = string(f)
+	}
+	return out
+}
+
+// TestReplayKeepsOnlyLatestOutcome: a second outcome supersedes the first
+// rather than leaving two contradictory endings in the ring.
+func TestReplayKeepsOnlyLatestOutcome(t *testing.T) {
+	s := New(Config{SecretKey: "k"})
+	s.runMu.Lock()
+	s.runSessionID = "run-1"
+	s.runMu.Unlock()
+
+	s.EmitRunOutcome("stage succeeded — no changes to push")
+	s.EmitRunOutcome("stage failed — final push error: boom")
+
+	s.mu.Lock()
+	replay := append([][]byte(nil), s.replay...)
+	s.mu.Unlock()
+
+	if len(replay) != 1 {
+		t.Fatalf("replay holds %d frames, want 1", len(replay))
+	}
+	if !strings.Contains(string(replay[0]), "final push error") {
+		t.Errorf("replayed outcome is not the latest: %s", replay[0])
 	}
 }

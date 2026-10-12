@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -17,12 +19,13 @@ import (
 
 	"github.com/konveyor/agentic-controller/api/skill"
 	"github.com/konveyor/migration-harness/internal/acp"
+	"github.com/konveyor/migration-harness/internal/askuser"
 	"github.com/konveyor/migration-harness/internal/config"
 	"github.com/konveyor/migration-harness/internal/git"
 	"github.com/konveyor/migration-harness/internal/goose"
 	"github.com/konveyor/migration-harness/internal/hub"
 	"github.com/konveyor/migration-harness/internal/logging"
-
+	"github.com/konveyor/migration-harness/internal/params"
 	"github.com/konveyor/migration-harness/internal/prompt"
 	"github.com/konveyor/migration-harness/internal/tee"
 	"github.com/konveyor/migration-harness/internal/watcher"
@@ -33,30 +36,101 @@ var rootCmd = &cobra.Command{
 	Short: "Thin git plumbing wrapper for goose-based migration stages",
 }
 
+// exitCode carries runStage's exit code out of cobra's RunE closure —
+// cobra's own Execute() error handling only distinguishes "no error"
+// from "error", which cannot express the harness's three-way exit-code
+// contract (ADR 0011: 0 succeeded, 1 failed, 2 limit reached).
+var exitCode int
+
+// ranRunStage records whether runCmd's RunE actually ran. runStage's own
+// deferred writeTerminationLog already records the stage outcome (with usage
+// stats and the real ACP stop reason) whenever it does — main's generic
+// post-Execute error handling must not write a second, sparser blob on top
+// of it (issue #189).
+var ranRunStage bool
+
 var runCmd = &cobra.Command{
 	Use:   "run",
 	Short: "Run a single migration stage (plan, execute, or verify)",
-	RunE:  runStage,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ranRunStage = true
+		code, err := runStage(cmd, args)
+		exitCode = code
+		return err
+	},
+}
+
+// askUserCmd is the stdio MCP server goose spawns for the ask_user tool
+// (listed in session/new mcpServers by runStage). It never loads the
+// harness config — it only speaks MCP on stdin/stdout.
+var askUserCmd = &cobra.Command{
+	Use:    askuser.Subcommand,
+	Short:  "Serve the ask_user MCP tool over stdio (started by goose, not by hand)",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		srv := askuser.New(os.Stdout, func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		})
+		err := srv.Serve(ctx, os.Stdin)
+		if err == context.Canceled {
+			return nil
+		}
+		return err
+	},
 }
 
 func init() {
 	rootCmd.AddCommand(runCmd)
+	rootCmd.AddCommand(askUserCmd)
 }
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		os.Exit(1)
+		if exitCode == 0 {
+			// Safety net: an error surfaced from outside runStage (e.g. a
+			// cobra flag-parsing error, so RunE never ran) leaves exitCode
+			// at its zero value — that must still mean failure.
+			exitCode = 1
+		}
+		if !ranRunStage {
+			// Surface the failure message on the pod termination log so the
+			// reason reaches the AgentRun's Ready condition, not solely the
+			// logs (#143). Only needed when runStage's own deferred
+			// writeTerminationLog never ran — e.g. a cobra flag-parsing
+			// error.
+			writeTerminationLog(terminationLogPath(), executeErrorTerminationBlob(err, exitCode))
+		}
+		os.Exit(exitCode)
 	}
+	os.Exit(exitCode)
 }
 
-func runStage(cmd *cobra.Command, args []string) error {
+func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	// Written on the way out regardless of how runStage returns — early
+	// setup failures keep this safe default; a real prompt outcome
+	// overwrites it below (ADR 0011: the blob is written "on exit").
+	term := terminationBlob{ExitCode: 1, Outcome: outcomeFailed.String()}
+	defer func() {
+		// A setup failure (config, hub resolution, clone, ...) returns
+		// before term ever gets a StopReason — back it with the actual
+		// returned error so the diagnostic isn't lost, without clobbering a
+		// more specific reason (e.g. the ACP stop reason from a completed
+		// turn) that a later stage already recorded.
+		if err != nil && term.StopReason == "" {
+			term.StopReason = err.Error()
+		}
+		writeTerminationLog(terminationLogPath(), term)
+	}()
 
 	// 1. Load config from env
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
-		return fmt.Errorf("config: %w", err)
+		return 1, fmt.Errorf("config: %w", err)
 	}
 
 	// 2. Resolve app info + git creds from Hub
@@ -96,11 +170,14 @@ func runStage(cmd *cobra.Command, args []string) error {
 
 	creds, err := resolveFromHub(cfg, hubClient)
 	if err != nil {
-		return fmt.Errorf("hub resolution: %w", err)
+		return 1, fmt.Errorf("hub resolution: %w", err)
 	}
+	// Model text is logged at stage end; whatever it says, the
+	// credentials goose inherits from this environment must not be in it.
+	red := newRedactor(cfg.APIKey, cfg.HubToken, cfg.ACPSecretKey, creds.Token)
 
 	if cfg.TargetBranch == creds.Branch {
-		return fmt.Errorf("TARGET_BRANCH %q must differ from source branch", cfg.TargetBranch)
+		return 1, fmt.Errorf("TARGET_BRANCH %q must differ from source branch", cfg.TargetBranch)
 	}
 	creds.Branch = cfg.TargetBranch
 
@@ -110,20 +187,20 @@ func runStage(cmd *cobra.Command, args []string) error {
 
 	repo, err := git.Clone(ctx, creds, cloneDir)
 	if err != nil {
-		return fmt.Errorf("clone: %w", err)
+		return 1, fmt.Errorf("clone: %w", err)
 	}
 
-	if err := git.ConfigureAuthor(repo); err != nil {
-		return fmt.Errorf("configure git author: %w", err)
+	if err := git.ConfigureAuthor(repo, cfg.GitAuthorName, cfg.GitAuthorEmail); err != nil {
+		return 1, fmt.Errorf("configure git author: %w", err)
 	}
 
 	if err := git.StripCredentials(repo); err != nil {
-		return fmt.Errorf("strip credentials: %w", err)
+		return 1, fmt.Errorf("strip credentials: %w", err)
 	}
 	hub.ClearEnv()
 
 	if err := git.CheckoutBranch(repo, creds.Branch); err != nil {
-		return fmt.Errorf("checkout branch %s: %w", creds.Branch, err)
+		return 1, fmt.Errorf("checkout branch %s: %w", creds.Branch, err)
 	}
 	logging.Ok("cloned to %s, branch %s", cloneDir, creds.Branch)
 
@@ -136,10 +213,36 @@ func runStage(cmd *cobra.Command, args []string) error {
 		logging.Warn("resolve base commit: %v", err)
 	}
 
+	// 3b. Pre-flight the push. The clone above only proves the repository
+	// can be read, which a public repository grants anonymously; the
+	// first thing needing write access is the final push, by which point
+	// every turn and every dollar of the run is already spent (#247). One
+	// remote round trip here buys the whole run.
+	if cfg.GitWriteCheck {
+		switch err := git.CheckWriteAccess(ctx, creds); {
+		case errors.Is(err, git.ErrNoWriteAccess):
+			// The go-git error names what the server said; the returned
+			// error names what the viewer can do about it.
+			logging.Err("git write access pre-flight: %s", red.redact(err.Error()))
+			return 1, gitWriteAccessError(creds)
+		case err != nil:
+			// Inconclusive, not a refusal. The clone just succeeded, so
+			// killing the run over a round trip that proved nothing would
+			// cost more than the late push failure it guards against.
+			logging.Warn("git write access pre-flight inconclusive: %s — continuing",
+				red.redact(err.Error()))
+		default:
+			logging.Ok("push access confirmed for %s", creds.RepoURL)
+		}
+	} else {
+		logging.Warn("push pre-flight disabled (HARNESS_GIT_WRITE_CHECK=off) — a missing or " +
+			"read-only credential will not surface until the final push")
+	}
+
 	// 4. Discover skills early — controls which setup steps run
 	skillPaths, err := discoverSkills()
 	if err != nil {
-		return fmt.Errorf("discover skills: %w", err)
+		return 1, fmt.Errorf("discover skills: %w", err)
 	}
 	hasSkills := len(skillPaths) > 0
 
@@ -151,11 +254,11 @@ func runStage(cmd *cobra.Command, args []string) error {
 	// image knows that (ADR 0015).
 	manifest, err := skill.ReadManifest(skillsDir())
 	if err != nil {
-		return fmt.Errorf("read skill manifest: %w", err)
+		return 1, fmt.Errorf("read skill manifest: %w", err)
 	}
 	rules, err := skill.RuleContent(skillsDir(), manifest)
 	if err != nil {
-		return fmt.Errorf("read rules: %w", err)
+		return 1, fmt.Errorf("read rules: %w", err)
 	}
 	if len(rules) > 0 {
 		names := make([]string, 0, len(rules))
@@ -165,47 +268,26 @@ func runStage(cmd *cobra.Command, args []string) error {
 		logging.Info("always-loaded rules: %s", strings.Join(names, ", "))
 	}
 
+	// Grounding data the first plan rung reports: -1 until the analysis
+	// was actually fetched (skills are what consume it).
+	insightCount := -1
 	if hasSkills {
-		if err := git.EnsureGitignore(cloneDir, []string{
-			"graphify-out/",
-			".goose/",
-			"__pycache__/",
-			"node_modules/",
-			"target/",
-			"*.tmp",
-			"*.swp",
-			"*.bak",
-		}); err != nil {
-			logging.Warn("gitignore: %v", err)
-		}
-
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return fmt.Errorf("resolve home dir: %w", err)
+			return 1, fmt.Errorf("resolve home dir: %w", err)
 		}
 		if err := symlinkSkillsDir(home, skillsDir()); err != nil {
-			return fmt.Errorf("skill symlink: %w", err)
+			return 1, fmt.Errorf("skill symlink: %w", err)
 		}
 		logging.Ok("symlinked %s/.agents/skills → %s", home, skillsDir())
-	}
 
-	if hasSkills {
-		// 4b. Write analysis to workspace (if resolved from Hub)
-		wroteAnalysis, err := fetchAndWriteAnalysis(hubClient, cfg.AppID, cloneDir)
-		if err != nil {
+		// 4b. Write analysis to workspace (if resolved from Hub). Uncommitted:
+		// the entry point never commits files itself; all commits are authored
+		// by the agent.
+		if n, err := fetchAndWriteAnalysis(hubClient, cfg.AppID, cloneDir); err != nil {
 			logging.Warn("analysis fetch: %v", err)
-		}
-
-		// 4c. Commit harness-managed files so they survive on the branch.
-		// Only commit when there is actual grounding data (analysis.json);
-		// .gitignore patterns take effect locally without a commit.
-		if wroteAnalysis {
-			if err := git.CommitFiles(repo, []string{
-				".gitignore",
-				".konveyor/analysis.json",
-			}, "harness: add grounding data"); err != nil {
-				return fmt.Errorf("commit harness files: %w", err)
-			}
+		} else {
+			insightCount = n
 		}
 	}
 
@@ -225,23 +307,47 @@ func runStage(cmd *cobra.Command, args []string) error {
 		Model:        cfg.Model,
 		APIKey:       cfg.APIKey,
 		Endpoint:     cfg.Endpoint,
+		Mode:         cfg.Params.Execution.Mode,
+		MaxTurns:     cfg.MaxTurns,
 	})
 	if err != nil {
-		return fmt.Errorf("start goose serve: %w", err)
+		return 1, fmt.Errorf("start goose serve: %w", err)
 	}
 	defer srv.Stop()
 
 	// 6. Connect ACP, create session
 	wsClient, err := acp.WaitReadyDial(ctx, "127.0.0.1", srv.Port(), srv.SecretKey(), 30*time.Second)
 	if err != nil {
-		return fmt.Errorf("connect to goose: %w", err)
+		return 1, fmt.Errorf("connect to goose: %w", err)
 	}
 	defer wsClient.Close()
 
 	session := acp.NewSessionClient(wsClient)
-	sessionID, err := session.CreateSession(ctx, cloneDir, nil)
+	// ask_user: the harness binary doubles as a stdio MCP server giving the
+	// agent one tool whose questions reach attached viewers (through the
+	// tee) and block the turn until answered — the in-turn "stop and
+	// confirm" the transcript otherwise cannot express.
+	var mcpServers []acp.MCPServer
+	if cfg.HITLAsk {
+		if self, err := os.Executable(); err == nil {
+			mcpServers = append(mcpServers, acp.MCPServer{
+				Name:    askuser.ToolName,
+				Command: self,
+				Args:    []string{askuser.Subcommand},
+				Env:     []acp.EnvVar{},
+			})
+		} else {
+			logging.Warn("ask_user tool disabled: cannot resolve harness executable: %v", err)
+		}
+	}
+	sessionID, err := session.CreateSession(ctx, cloneDir, mcpServers)
 	if err != nil {
-		return fmt.Errorf("create session: %w", err)
+		return 1, fmt.Errorf("create session: %w", err)
+	}
+	if len(mcpServers) > 0 {
+		logging.Ok("ask_user tool mounted (questions reach attached viewers; an unanswered one fails the run)")
+	} else if !cfg.HITLAsk {
+		logging.Info("ask_user tool not mounted (opt in with spec.execution.askUser or HARNESS_HITL_ASK=on)")
 	}
 
 	// 6b. Expose the run: tee listener on the pod ACP port. Viewers get
@@ -272,6 +378,10 @@ func runStage(cmd *cobra.Command, args []string) error {
 
 	// Harness lifecycle → viewer status frames, in standard ACP
 	// vocabulary. Everything is a no-op without a live tee.
+	prepRung := planPrepRung(creds.RepoURL, creds.Branch, insightCount, red)
+	// turnsSeen is the run's turn count so far across the primary prompt
+	// and the handoff; the task rung re-renders with it on every turn.
+	var turnsSeen atomic.Int64
 	emitPlan := func(prep, agentRun, finish string) {
 		if teeSrv == nil {
 			return
@@ -282,8 +392,8 @@ func runStage(cmd *cobra.Command, args []string) error {
 		teeSrv.EmitRunUpdate(map[string]any{
 			"sessionUpdate": "plan",
 			"entries": []map[string]any{
-				entry("Prepare workspace: clone, branch, grounding data", prep),
-				entry("Agent works the stage task", agentRun),
+				entry(prepRung, prep),
+				entry(planTaskRung(cfg, red, int(turnsSeen.Load())), agentRun),
 				entry(fmt.Sprintf("Push results to branch %s", creds.Branch), finish),
 			},
 		})
@@ -314,6 +424,15 @@ func runStage(cmd *cobra.Command, args []string) error {
 		}
 		teeSrv.EmitRunNotice(fmt.Sprintf(format, args...))
 	}
+	// emitOutcome is emitNotice for the one line that says how the stage
+	// ended — kept in the replay ring so a viewer attaching after the run
+	// is told the result rather than a frozen ladder.
+	emitOutcome := func(format string, args ...any) {
+		if teeSrv == nil {
+			return
+		}
+		teeSrv.EmitRunOutcome(fmt.Sprintf(format, args...))
+	}
 
 	// Workspace prep all happened before the tee existed; publish it as
 	// already done so a viewer's first glance shows the ladder.
@@ -324,53 +443,132 @@ func runStage(cmd *cobra.Command, args []string) error {
 		AgentPrompt:   cfg.AgentPrompt,
 		Rules:         rules,
 		WorkflowGuide: cfg.WorkflowGuide,
+		Parameters:    params.RenderSection(cfg.Params),
 		StageTask:     cfg.StageInstructions,
+		AskUser:       len(mcpServers) > 0,
 	})
 
 	// 8. Start filesystem watcher BEFORE blocking prompt
 	pushFn := func() error {
-		_, err := emitPush("git push (auto-commit watcher)", func() (bool, error) {
+		_, err := emitPush(fmt.Sprintf("git push to branch %s (auto-commit watcher)", creds.Branch), func() (bool, error) {
 			return git.Push(ctx, creds, repo, creds.Branch, baseSHA)
 		})
 		return err
 	}
 	w, err := watcher.New(cloneDir, pushFn)
 	if err != nil {
-		return fmt.Errorf("create watcher: %w", err)
+		return 1, fmt.Errorf("create watcher: %w", err)
 	}
 	if err := w.Start(ctx); err != nil {
-		return fmt.Errorf("start watcher: %w", err)
+		return 1, fmt.Errorf("start watcher: %w", err)
 	}
 	defer w.Stop()
 
-	// 9. Send single ACP prompt (blocks until goose finishes or MaxTurns is hit)
+	// 9. Send the primary ACP prompt (blocks until goose finishes
+	// naturally, hits its native GOOSE_MAX_TURNS, or the harness cancels
+	// it for cost — ADR 0011).
 	logging.Header("Running Stage")
 	logging.Info("max turns: %d", cfg.MaxTurns)
 	emitPlan("completed", "in_progress", "pending")
 	if teeSrv != nil {
 		teeSrv.SetRunActive(true)
 	}
-	promptResult, err := session.SendPrompt(ctx, sessionID, []acp.ContentBlock{
+	// Turns re-emit the ladder so the task rung shows progress against
+	// the budget instead of one spinner for the whole turn — but on a
+	// stride, not every turn: a 200-turn run would otherwise broadcast
+	// 200 ladders, each one a full-state frame fanned out to every
+	// attached viewer. The handler fires from SendPrompt's own goroutine
+	// between notifications; turnBase carries the primary's count into
+	// the handoff prompt, whose result counts from zero again.
+	//
+	// turnsSeen is stored on every turn regardless, so the ladder emitted
+	// after the run (step 9b below) always renders the exact final count.
+	turnBase := 0
+	session.SetTurnHandler(func(n int) {
+		total := turnBase + n
+		turnsSeen.Store(int64(total))
+		if shouldEmitTurn(total, cfg.MaxTurns) {
+			emitPlan("completed", "in_progress", "pending")
+		}
+	})
+	primaryResult, err := session.SendPrompt(ctx, sessionID, []acp.ContentBlock{
 		{Type: "text", Text: stagePrompt},
-	}, cfg.MaxTurns)
+	}, cfg.CostLimit)
+	if primaryResult != nil {
+		turnBase = primaryResult.TurnsUsed
+		turnsSeen.Store(int64(turnBase))
+	}
 	if teeSrv != nil {
 		teeSrv.SetRunActive(false)
 	}
 
-	// A viewer's session/cancel surfaces as a clean stop with
-	// stopReason=cancelled — a deliberate human abort, not a success.
-	cancelled := err == nil && promptResult != nil && promptResult.StopReason == "cancelled"
-	if cancelled {
+	// The closing message is read first: a provider refusal rendered as
+	// prose decides the outcome when no turn was used (#231).
+	providerErr := primaryResult != nil && logAgentClosingMessage(primaryResult, red)
+	providerRejected := providerErr && primaryResult.TurnsUsed == 0
+	var providerSummary string
+	if providerErr {
+		providerSummary = providerErrorSummary(red.redact(primaryResult.FinalMessage()))
+	}
+	stageOutcome, limit := classifyOutcome(primaryResult, err, params.NativeTurnLimit(cfg.MaxTurns), providerErr)
+
+	// An unanswered ask_user question is a HITL gate the harness stopped the
+	// turn on: it also surfaces as stopReason=cancelled (the harness fired
+	// session/cancel), so check it before the viewer-cancel case and give it
+	// its own message rather than blaming a viewer.
+	hitlUnanswered := session.HITLGateUnanswered()
+	viewerCancelled := err == nil && primaryResult != nil &&
+		primaryResult.StopReason == "cancelled" && !primaryResult.CostLimitReached && !hitlUnanswered
+	switch {
+	case hitlUnanswered:
+		logging.Err("run stopped: an ask_user question went unanswered (HITL gate, fail-closed)")
+	case viewerCancelled:
 		logging.Warn("run cancelled by an attached viewer")
 	}
 	if err != nil {
-		logging.Err("prompt failed: %v", err)
+		logging.Err("prompt failed: %s", red.redact(err.Error()))
+	}
+	// Tell the people watching in words they can act on: the console
+	// viewer has no pod log, but the provider's own error names the fix.
+	switch {
+	case providerRejected:
+		emitNotice("the model provider rejected the call — no work was done: %s", providerSummary)
+	case providerErr:
+		emitNotice("the model provider rejected a call after %d turns: %s", primaryResult.TurnsUsed, providerSummary)
+	}
+
+	// 9b. One-shot handoff prompt when a limit was reached (ADR 0011).
+	// A handoff-prompt error is logged only — the limit-reached outcome
+	// stands regardless; the watcher has been auto-pushing throughout
+	// the run, so real work isn't lost even if this best-effort round
+	// trip fails.
+	var handoffResult *acp.PromptResult
+	if stageOutcome == outcomeLimitReached {
+		logging.Warn("execution limit reached (%s) — sending handoff prompt", limit)
+		// ACP cost is session-cumulative (combineUsage relies on the same
+		// fact), so the handoff call must compare against the full
+		// configured MaxCost, not the primary's reserved CostLimit —
+		// cumulative spend already sits at ~85% of MaxCost when the
+		// primary stops, so reusing CostLimit here would leave the
+		// handoff no room to write .konveyor/handoff.md and commit
+		// before being cancelled itself.
+		var handoffErr error
+		handoffResult, handoffErr = session.SendPrompt(ctx, sessionID, []acp.ContentBlock{
+			{Type: "text", Text: handoffPromptText},
+		}, cfg.MaxCost)
+		if handoffErr != nil {
+			logging.Warn("handoff prompt: %v — continuing, the limit-reached outcome stands", handoffErr)
+		}
+		if handoffResult != nil {
+			logAgentClosingMessage(handoffResult, red)
+		}
 	}
 	emitPlan("completed", "completed", "in_progress")
 
-	// 10. Check goose health
+	// 10. Check goose health — a crash overrides any outcome above.
 	if !srv.Alive() {
 		logging.Err("goose serve crashed")
+		stageOutcome, limit = outcomeFailed, limitNone
 	}
 
 	// 11. Check for uncommitted work
@@ -383,47 +581,106 @@ func runStage(cmd *cobra.Command, args []string) error {
 	// 12. Stop watcher before final push
 	w.Stop()
 
-	// 13. Determine exit status from ACP/goose signals
-	stageFailed := err != nil || !srv.Alive() || cancelled
+	// 13. Usage stats and termination log, regardless of outcome. Set
+	// before the final push below so a push failure doesn't discard
+	// them — the deferred writeTerminationLog fires no matter how this
+	// function returns (ADR 0011: the blob is written "on exit").
+	if primaryResult != nil {
+		u := combineUsage(primaryResult, handoffResult)
+		term = terminationBlob{
+			ExitCode:     stageOutcome.exitCode(),
+			Outcome:      stageOutcome.String(),
+			LimitReached: string(limit),
+			StopReason:   primaryResult.StopReason,
+			Usage:        &u,
+		}
+		if providerRejected {
+			// "end_turn" is what goose said; the provider's message is
+			// what happened, and stopReason is the blob's free-text field
+			// for it (#231).
+			term.StopReason = "provider error: " + providerSummary
+		}
+	} else {
+		term = terminationBlob{ExitCode: stageOutcome.exitCode(), Outcome: stageOutcome.String()}
+	}
 
 	// 14. Final push (use a fresh context — the signal context may
 	// already be cancelled after SIGINT)
 	logging.Header("Final Push")
 	pushCtx, pushCancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer pushCancel()
-	pushed, err := emitPush("git push (final)", func() (bool, error) {
+	pushed, pushErr := emitPush(fmt.Sprintf("git push to branch %s (final)", creds.Branch), func() (bool, error) {
 		return git.Push(pushCtx, creds, repo, creds.Branch, baseSHA)
 	})
-	if err != nil {
-		emitNotice("stage failed — final push error: %v", err)
-		return fmt.Errorf("final push: %w", err)
+	if pushErr != nil {
+		emitOutcome("stage failed — final push error: %v", pushErr)
+		term.ExitCode = 1
+		term.Outcome = outcomeFailed.String()
+		term.LimitReached = ""
+		// The push failure, not whatever ACP stop reason term already
+		// carries from the completed turn above, is the actual reason this
+		// stage failed — surface it instead of the stale value.
+		term.StopReason = fmt.Sprintf("final push: %v", pushErr)
+		return 1, fmt.Errorf("final push: %w", pushErr)
 	}
 	emitPlan("completed", "completed", "completed")
 
 	// 15. Exit. pushed is false when the run produced no commits, so the
 	// notices must not claim work landed on the branch.
-	if stageFailed {
+	switch stageOutcome {
+	case outcomeSucceeded:
+		stageSucceeded = true
+		if pushed {
+			emitOutcome("stage succeeded — results pushed to branch %s", creds.Branch)
+		} else {
+			emitOutcome("stage succeeded — no changes to push")
+		}
+		logging.Ok("stage succeeded")
+		return 0, nil
+
+	case outcomeLimitReached:
+		if pushed {
+			emitOutcome("execution limit reached (%s) — handoff committed, results pushed to branch %s", limit, creds.Branch)
+			logging.Ok("stage stopped at execution limit (%s) — handoff committed", limit)
+		} else {
+			// The handoff prompt itself only gets the runtime's native
+			// per-prompt turn budget too — for a very small configured
+			// maxTurns, that may not be enough for the agent to actually
+			// write .konveyor/handoff.md and commit before its own turns
+			// run out. Report what actually happened, not what was hoped for.
+			emitOutcome("execution limit reached (%s) — no commits to push", limit)
+			logging.Warn("stage stopped at execution limit (%s) — handoff prompt ran but produced no commit", limit)
+		}
+		return 2, nil
+
+	default: // outcomeFailed
 		switch {
-		case cancelled && pushed:
-			emitNotice("run cancelled by viewer — partial work pushed to branch %s", creds.Branch)
-		case cancelled:
-			emitNotice("run cancelled by viewer — no commits to push")
+		case hitlUnanswered && pushed:
+			emitOutcome("run stopped — an ask_user question went unanswered (no human to decide); partial work pushed to branch %s", creds.Branch)
+		case hitlUnanswered:
+			emitOutcome("run stopped — an ask_user question went unanswered (no human to decide); no commits to push")
+		case viewerCancelled && pushed:
+			emitOutcome("run cancelled by viewer — partial work pushed to branch %s", creds.Branch)
+		case viewerCancelled:
+			emitOutcome("run cancelled by viewer — no commits to push")
+		case providerRejected:
+			emitOutcome("stage failed — the model provider rejected the call; no work was done")
 		case pushed:
-			emitNotice("stage failed — partial work pushed to branch %s", creds.Branch)
+			emitOutcome("stage failed — partial work pushed to branch %s", creds.Branch)
 		default:
-			emitNotice("stage failed — no commits to push")
+			emitOutcome("stage failed — no commits to push")
+		}
+		if hitlUnanswered {
+			logging.Err("stage failed: ask_user question unanswered (HITL gate)")
+			return 1, fmt.Errorf("stage failed: ask_user question unanswered (HITL gate)")
+		}
+		if providerRejected {
+			logging.Err("stage failed: the model provider rejected the call — %s", providerSummary)
+			return 1, fmt.Errorf("stage failed: provider error: %s", providerSummary)
 		}
 		logging.Err("stage failed")
-		return fmt.Errorf("stage failed")
+		return 1, fmt.Errorf("stage failed")
 	}
-	stageSucceeded = true
-	if pushed {
-		emitNotice("stage succeeded — results pushed to branch %s", creds.Branch)
-	} else {
-		emitNotice("stage succeeded — no changes to push")
-	}
-	logging.Ok("stage succeeded")
-	return nil
 }
 
 func symlinkSkillsDir(homeDir, skillsSrc string) error {
@@ -492,6 +749,17 @@ func resolveFromHub(cfg *config.Config, hubClient *hub.Client) (*git.Credentials
 	if err != nil {
 		return nil, fmt.Errorf("fetch app: %w", err)
 	}
+	if app.Repository == nil {
+		return nil, fmt.Errorf("application %q has no source repository configured", app.Name)
+	}
+
+	// Fail fast on non-git sources instead of attempting the clone and
+	// failing later with a confusing go-git error (issue #143). Runs before
+	// the log line below so a bad source is rejected cleanly rather than
+	// surfacing later as a deep go-git clone error.
+	if err := hub.ValidateSourceRepository(app.Repository); err != nil {
+		return nil, err
+	}
 	logging.Ok("app: %s (id=%d), repo: %s", app.Name, app.ID, app.Repository.URL)
 
 	identity, err := hubClient.FetchGitCreds(appID)
@@ -506,10 +774,17 @@ func resolveFromHub(cfg *config.Config, hubClient *hub.Client) (*git.Credentials
 	if identity != nil {
 		creds.Username = identity.User
 		creds.Token = identity.Password
+		creds.IdentityName = identity.Name
 		if creds.Username == "" {
 			creds.Username = "x-access-token"
 		}
 		logging.Ok("git identity: %s", identity.Name)
+	} else {
+		// The anonymous case logged nothing at all, so a run that was
+		// never going to be able to push looked exactly like a
+		// credentialed one until the final push failed (#247).
+		logging.Warn("git identity: none (anonymous) - pushes will fail unless " +
+			"the repository allows anonymous writes")
 	}
 
 	return creds, nil
@@ -528,53 +803,255 @@ func parseHubTokenID(cfg *config.Config) (uint, bool) {
 	return uint(tokenID), true
 }
 
+// workflowStagePosition returns this run's 1-based stage index and the
+// workflow's stage count. ok is false for standalone runs (both values
+// empty) and for metadata that does not describe a position: non-numeric,
+// zero, or an index past the count.
+func workflowStagePosition(cfg *config.Config) (stage, count uint64, ok bool) {
+	if cfg.WorkflowStage == "" || cfg.WorkflowStageCount == "" {
+		return 0, 0, false
+	}
+	stage, err := strconv.ParseUint(cfg.WorkflowStage, 10, 64)
+	if err != nil || stage == 0 {
+		return 0, 0, false
+	}
+	count, err = strconv.ParseUint(cfg.WorkflowStageCount, 10, 64)
+	if err != nil || count == 0 || stage > count {
+		return 0, 0, false
+	}
+	return stage, count, true
+}
+
 // isIntermediateWorkflowStage reports whether the harness is running an
 // intermediate (not last) stage of a multi-stage workflow. Returns false
 // for standalone runs, last stages, and invalid metadata.
 func isIntermediateWorkflowStage(cfg *config.Config) bool {
-	if cfg.WorkflowStage == "" || cfg.WorkflowStageCount == "" {
-		return false
-	}
-	stage, err := strconv.ParseUint(cfg.WorkflowStage, 10, 64)
-	if err != nil || stage == 0 {
-		return false
-	}
-	count, err := strconv.ParseUint(cfg.WorkflowStageCount, 10, 64)
-	if err != nil || count == 0 {
-		return false
-	}
-	return stage < count
+	stage, count, ok := workflowStagePosition(cfg)
+	return ok && stage < count
 }
 
-func fetchAndWriteAnalysis(hubClient *hub.Client, appIDStr string, workDir string) (bool, error) {
+// planPrepRung is the first rung of the plan ladder: what the workspace
+// holds by the time viewers can attach. insightCount < 0 means the
+// analysis was not fetched (a run without skills has no consumer for it),
+// so the rung says nothing about it rather than claiming zero.
+func planPrepRung(repoURL, branch string, insightCount int, red *redactor) string {
+	var b strings.Builder
+	b.WriteString("Prepare workspace: ")
+	if repo := repoDisplayName(repoURL); repo != "" {
+		b.WriteString(red.redact(repo))
+	} else {
+		b.WriteString("clone")
+	}
+	if branch != "" {
+		fmt.Fprintf(&b, " on branch %s", branch)
+	}
+	switch {
+	case insightCount < 0:
+	case insightCount == 0:
+		b.WriteString(", no analysis insights")
+	case insightCount == 1:
+		b.WriteString(", 1 analysis insight")
+	default:
+		fmt.Fprintf(&b, ", %d analysis insights", insightCount)
+	}
+	return b.String()
+}
+
+// repoDisplayName reduces a clone URL to host and path for a viewer:
+// scheme, embedded credentials and a trailing .git dropped. Empty when
+// the URL is empty or does not parse.
+func repoDisplayName(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	name := u.Host + strings.TrimSuffix(strings.TrimRight(u.Path, "/"), ".git")
+	return name
+}
+
+// taskSummaryMaxLen bounds the task excerpt on the plan rung: one line of
+// the viewer's ladder, not the whole stage prompt.
+const taskSummaryMaxLen = 80
+
+// ladderTurnSteps is roughly how many times the task rung refreshes over
+// a whole turn budget. Enough for the count to look alive; few enough
+// that a long run does not spend its viewer bandwidth re-sending the
+// ladder. A 200-turn budget emits ~21 ladders instead of 200.
+const ladderTurnSteps = 20
+
+// shouldEmitTurn decides whether finishing turn n is worth re-rendering
+// the plan ladder for. The first turn always is (it is the one a viewer
+// is waiting on to know the agent started) and so is anything at or past
+// the ceiling (the end of the budget, and the overrun turns that say the
+// run is out of road); in between the ladder refreshes on a fixed
+// stride. With no budget configured there is no scale to pace against,
+// so every turn is emitted, as before.
+func shouldEmitTurn(n, ceiling int) bool {
+	if n <= 1 || ceiling <= 0 || n >= ceiling {
+		return true
+	}
+	// Round the stride up, so the emit count stays at or under
+	// ladderTurnSteps rather than overshooting it by up to 2x.
+	step := (ceiling + ladderTurnSteps - 1) / ladderTurnSteps
+	if step < 2 {
+		return true
+	}
+	return n%step == 0
+}
+
+// planTaskRung is the middle rung of the plan ladder the harness shows
+// viewers: which stage this is, what the task asks, and the model and turn
+// budget it runs under. Before this the rung read "Agent works the stage
+// task" for every run, which told a viewer nothing the other two rungs did
+// not. The excerpt is the first line of the stage instructions, rendered
+// with parameter values substituted, so it passes through the redactor
+// like every other text the harness publishes — in full, before the cut.
+//
+// turnsUsed is the run's turn count so far: zero before the prompt is
+// sent ("up to N turns"), then "turn 12 of N" as the ladder is re-emitted
+// per turn. N is the configured budget; the runtime's native ceiling
+// sits at ReserveFraction of it, with the rest kept for the handoff.
+func planTaskRung(cfg *config.Config, red *redactor, turnsUsed int) string {
+	var b strings.Builder
+	// Redact the whole text BEFORE the excerpt is cut: exact-match
+	// redaction cannot recognise a token the cutoff has split, and the
+	// leaked head would sit in the replay ring for every late viewer.
+	// Only the stage instructions are quoted — what a person typed for
+	// this run. The agent prompt opens with a persona ("You are a senior
+	// Java engineer…"), which cut to a line says nothing about the work.
+	excerpt := taskSummary(red.redact(cfg.StageInstructions))
+	stage, count, staged := workflowStagePosition(cfg)
+	switch {
+	case staged && excerpt != "":
+		fmt.Fprintf(&b, "Stage %d of %d — agent works the task: \u201c%s\u201d", stage, count, excerpt)
+	case staged:
+		fmt.Fprintf(&b, "Stage %d of %d — agent works its standing prompt", stage, count)
+	case excerpt != "":
+		fmt.Fprintf(&b, "Agent works the task: \u201c%s\u201d", excerpt)
+	default:
+		b.WriteString("Agent works its standing prompt")
+	}
+	var budget string
+	switch {
+	case turnsUsed > 0 && cfg.MaxTurns > 0:
+		budget = fmt.Sprintf("turn %d of %d", turnsUsed, cfg.MaxTurns)
+	case turnsUsed == 1:
+		budget = "1 turn"
+	case turnsUsed > 1:
+		budget = fmt.Sprintf("%d turns", turnsUsed)
+	case cfg.MaxTurns > 0:
+		budget = fmt.Sprintf("up to %d turns", cfg.MaxTurns)
+	}
+	if cfg.Model != "" || budget != "" {
+		b.WriteString(" (")
+		if cfg.Model != "" {
+			b.WriteString(cfg.Model)
+			if budget != "" {
+				b.WriteString(", ")
+			}
+		}
+		b.WriteString(budget)
+		b.WriteString(")")
+	}
+	return b.String()
+}
+
+// taskSummary returns the first paragraph of text as one line — the
+// lines up to the first blank one, joined with spaces, so hard-wrapped
+// YAML prose is not cut at its first wrap — stripped of leading Markdown
+// heading and list markers and cut to taskSummaryMaxLen runes with an
+// ellipsis. Empty when the text is blank.
+func taskSummary(text string) string {
+	var words []string
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if len(words) == 0 {
+			line = strings.TrimSpace(strings.TrimLeft(line, "#*->"))
+		}
+		if line == "" {
+			if len(words) > 0 {
+				break
+			}
+			continue
+		}
+		words = append(words, strings.Fields(line)...)
+	}
+	summary := strings.Join(words, " ")
+	if r := []rune(summary); len(r) > taskSummaryMaxLen {
+		summary = strings.TrimSpace(string(r[:taskSummaryMaxLen-1])) + "…"
+	}
+	return summary
+}
+
+// fetchAndWriteAnalysis writes the application's analysis insights to
+// .konveyor/analysis.json in the workspace and returns how many there were.
+func fetchAndWriteAnalysis(hubClient *hub.Client, appIDStr string, workDir string) (int, error) {
 	appID, err := hub.ParseAppID(appIDStr)
 	if err != nil {
-		return false, fmt.Errorf("invalid APP_ID %q: %w", appIDStr, err)
+		return 0, fmt.Errorf("invalid APP_ID %q: %w", appIDStr, err)
 	}
 	insights, err := hubClient.FetchAnalysis(appID)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	if len(insights) == 0 {
 		logging.Info("no analysis results for app %s", appIDStr)
-		return false, nil
+		return 0, nil
 	}
 
 	analysisDir := filepath.Join(workDir, ".konveyor")
 	if err := os.MkdirAll(analysisDir, 0o755); err != nil {
-		return false, fmt.Errorf("create .konveyor dir: %w", err)
+		return 0, fmt.Errorf("create .konveyor dir: %w", err)
 	}
 
 	data, err := json.MarshalIndent(insights, "", "  ")
 	if err != nil {
-		return false, fmt.Errorf("marshal analysis: %w", err)
+		return 0, fmt.Errorf("marshal analysis: %w", err)
 	}
 
 	analysisPath := filepath.Join(analysisDir, "analysis.json")
 	if err := os.WriteFile(analysisPath, data, 0o644); err != nil {
-		return false, fmt.Errorf("write analysis: %w", err)
+		return 0, fmt.Errorf("write analysis: %w", err)
 	}
 
 	logging.Ok("wrote %d analysis insights to %s", len(insights), analysisPath)
-	return true, nil
+	return len(insights), nil
+}
+
+// closingMessageLimit bounds what a closing message adds to the pod log.
+// Enough for a summary or a provider error; a wall of text is cut, with
+// its full size noted.
+const closingMessageLimit = 4000
+
+// logAgentClosingMessage writes the agent's closing message (and any goose
+// notices) to the pod log, secrets redacted, and reports whether the message
+// is one of goose's provider-failure texts. The log line is the only durable record of what
+// the model said: the live transcript lives in the tee and dies with the
+// pod, and nothing else persists assistant text. goose reports provider
+// failures as assistant prose rather than RPC errors — without this a run
+// that never reached the model ends "stage succeeded — no changes to push"
+// with no trace of why.
+func logAgentClosingMessage(r *acp.PromptResult, red *redactor) (providerError bool) {
+	for _, n := range r.Notices {
+		logging.Warn("goose notice: %s", red.redact(n))
+	}
+	full := red.redact(strings.TrimSpace(r.FinalMessage()))
+	if full == "" {
+		logging.Info("agent closing message: none (%d text chunks during the turn)", len(r.Chunks))
+		return false
+	}
+	msg := full
+	if runes := []rune(full); len(runes) > closingMessageLimit {
+		msg = string(runes[:closingMessageLimit]) + fmt.Sprintf("… [truncated, %d bytes total]", len(full))
+	}
+	if r.ClosingProviderError() {
+		logging.Warn("agent closing message matches goose's provider-error text "+
+			"(the model call may have failed or been refused; goose ended the turn normally):\n%s", msg)
+		return true
+	}
+	logging.Info("agent closing message:\n%s", msg)
+	return false
 }

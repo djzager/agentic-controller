@@ -33,6 +33,23 @@ type AgentWorkflowRunStageStatus struct {
 	// AgentRunName is the name of the AgentRun CR created for this stage.
 	// +optional
 	AgentRunName string `json:"agentRunName,omitempty"`
+
+	// The following fields snapshot the stage definition captured from
+	// the AgentWorkflow at initialization time (#87). The controller
+	// executes from this snapshot, not the live workflow spec, so a
+	// mid-run edit to the workflow cannot change stages already planned.
+
+	// AgentRef is the snapshotted Agent name for this stage.
+	// +optional
+	AgentRef string `json:"agentRef,omitempty"`
+
+	// Instructions is the snapshotted stage instruction text.
+	// +optional
+	Instructions string `json:"instructions,omitempty"`
+
+	// Execution is the snapshotted stage execution override.
+	// +optional
+	Execution *ExecutionSpec `json:"execution,omitempty"`
 }
 
 // AgentWorkflowRunSpec defines the desired state of an AgentWorkflowRun.
@@ -53,7 +70,7 @@ type AgentWorkflowRunSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	Params []AgentRunParam `json:"params,omitempty"`
+	Params []ParamValue `json:"params,omitempty"`
 
 	// Env is a list of additional environment variables to set across
 	// all stages. Passed through to each AgentRun's Sandbox unchanged.
@@ -64,6 +81,25 @@ type AgentWorkflowRunSpec struct {
 	// across all stages. Passed through to each AgentRun's Sandbox.
 	// +optional
 	EnvFrom []corev1.EnvFromSource `json:"envFrom,omitempty"`
+
+	// FileMounts attaches Secrets or ConfigMaps as read-only files across
+	// all stages. Passed through to each stage's AgentRun unchanged and
+	// validated there against the controller-managed mounts.
+	// +optional
+	// +listType=map
+	// +listMapKey=mountPath
+	FileMounts []FileMount `json:"fileMounts,omitempty"`
+
+	// TTLSecondsAfterFinished limits the lifetime of an AgentWorkflowRun that
+	// has reached a terminal phase (Succeeded or Failed), mirroring Job's
+	// ttlSecondsAfterFinished. When set, the controller deletes the run this
+	// many seconds after it finished — cascading to the child AgentRuns it
+	// owns via owner references — so terminal runs do not accumulate. Zero
+	// deletes as soon as the run finishes. When unset, the run is kept until
+	// deleted manually, unless the controller is configured with a default TTL.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	TTLSecondsAfterFinished *int32 `json:"ttlSecondsAfterFinished,omitempty"`
 }
 
 // AgentWorkflowRunStatus defines the observed state of an AgentWorkflowRun.
@@ -81,11 +117,25 @@ type AgentWorkflowRunStatus struct {
 	// +optional
 	CurrentStage string `json:"currentStage,omitempty"`
 
-	// Stages tracks the status of each stage.
+	// Stages tracks the status of each stage, and snapshots each stage's
+	// definition at initialization time (#87).
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Stages []AgentWorkflowRunStageStatus `json:"stages,omitempty"`
+
+	// Guide snapshots the AgentWorkflow guide at initialization time, so
+	// mid-run edits do not change it for stages still to run (#87).
+	// +optional
+	Guide string `json:"guide,omitempty"`
+
+	// Params snapshots the AgentWorkflow's workflow-level parameter
+	// declarations at initialization time, so coercion of the run's
+	// supplied values stays stable across a mid-run workflow edit (#87).
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Params []Param `json:"params,omitempty"`
 
 	// StartTime is the time the workflow run started.
 	// +optional

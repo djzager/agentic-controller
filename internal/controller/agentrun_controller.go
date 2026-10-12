@@ -22,10 +22,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -72,7 +75,13 @@ const (
 	// workspaceVolumeName is the name of the EmptyDir volume for the agent workspace.
 	workspaceVolumeName = "workspace"
 
+	// workspaceDir is where the agent workspace EmptyDir is mounted.
+	workspaceDir = "/workspace"
+
 	tmpVolumeName = "tmp"
+
+	// tmpDir is where the writable /tmp EmptyDir is mounted.
+	tmpDir = "/tmp"
 
 	// skillsVolumeName backs the assembled skills root. The loader writes it,
 	// the agent reads it.
@@ -110,6 +119,24 @@ const (
 	// SkillCard imposes on what they carry.
 	skillSourcesEnv = "KONVEYOR_SKILL_SOURCES"
 
+	// gitAuthorNameEnv / gitAuthorEmailEnv carry the resolved commit
+	// identity to the harness. They are controller-managed: a user copy in
+	// run.Spec.Env is dropped, and the controller always emits both (even
+	// empty) so container env outranks any copy smuggled in through
+	// run.Spec.EnvFrom. Neither path can bypass GitConfig's validation
+	// (the both-or-neither and no-metacharacter rules that guard against
+	// forged or half-set commit authorship).
+	gitAuthorNameEnv  = "KONVEYOR_GIT_AUTHOR_NAME"
+	gitAuthorEmailEnv = "KONVEYOR_GIT_AUTHOR_EMAIL"
+
+	// sandboxConditionFinished is the Sandbox condition type that reports the
+	// run has reached a terminal state (Succeeded or Failed).
+	sandboxConditionFinished = "Finished"
+
+	// paramsVolumeName is the name of the ConfigMap volume carrying
+	// /run/konveyor/params.json (ADR 0009).
+	paramsVolumeName = "konveyor-params"
+
 	// sandboxFinishedReasonSucceeded is the Sandbox condition reason for
 	// success. Must match Agent Sandbox's SandboxReasonPodSucceeded constant.
 	sandboxFinishedReasonSucceeded = "PodSucceeded"
@@ -117,6 +144,30 @@ const (
 	// agentRunRefIndexField is the field index for looking up AgentRuns by agentRef.
 	agentRunRefIndexField = ".spec.agentRef"
 )
+
+// reservedMountPaths are the controller-managed mount points inside the
+// Sandbox container. A user file mount (AgentRun.spec.fileMounts) may not
+// land on, under, or above any of these — doing so would shadow the skills
+// root, params.json, or the workspace and break the harness contract. This
+// also protects the service-account token mount injected by Kubernetes.
+// Controller-managed paths share constants with their mount sites.
+var reservedMountPaths = []string{
+	skillsDir,                // /opt/skills
+	skillsSrcDir,             // /opt/skills-src
+	path.Dir(ParamsFilePath), // /run/konveyor
+	workspaceDir,             // /workspace
+	tmpDir,                   // /tmp
+	"/var/run/secrets/kubernetes.io/serviceaccount", // injected by Kubernetes
+}
+
+// errGatewayNotFound marks a createSandbox failure caused by the run's selected
+// Gateway CR not existing (as opposed to existing-but-not-Ready, or any other
+// createSandbox error). The caller uses it to report a distinct GatewayNotFound
+// status reason and retry with backoff, ImagePullBackOff-style: a missing
+// Gateway is treated as a timing condition that may resolve on its own (the CR
+// is applied moments later, or the informer cache catches up), not a terminal
+// failure that would strand a run whose spec is immutable.
+var errGatewayNotFound = stderrors.New("selected gateway does not exist")
 
 // AgentRunReconciler reconciles an AgentRun object.
 type AgentRunReconciler struct {
@@ -128,15 +179,39 @@ type AgentRunReconciler struct {
 	// harness binary and the source list written here is always read by a
 	// loader of the same version.
 	SkillLoaderImage string
+
+	// DefaultTTLAfterFinished, when non-nil, is the fallback lifetime applied
+	// to a terminal AgentRun whose spec does not set TTLSecondsAfterFinished.
+	// The controller deletes such a run this long after it finished. Nil
+	// disables the default (runs are kept until deleted). A run's own
+	// spec.ttlSecondsAfterFinished always overrides this. Wired from the
+	// --agentrun-ttl flag in main.
+	DefaultTTLAfterFinished *time.Duration
+
+	// DefaultStartupDeadline bounds how long a run may take to reach a
+	// running state before it is failed with StartupDeadlineExceeded, for
+	// runs that do not set spec.startupDeadlineSeconds. Nil or zero means
+	// no default deadline; fatal pod errors still fail runs immediately.
+	// Set from --agentrun-startup-deadline.
+	DefaultStartupDeadline *time.Duration
+
+	// apiReader reads directly from the API server, bypassing the manager
+	// cache. It is used only for the best-effort pod termination-message
+	// lookup: a direct read avoids surfacing a stale generic message when
+	// the label-restricted Pod cache (see SandboxPodCacheOptions) lags the
+	// Sandbox "Finished" condition. The cache-backed client still serves the
+	// phase=Running read, so the controller keeps watching sandbox pods. Set
+	// by SetupWithManager.
+	apiReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=konveyor.io,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=konveyor.io,resources=agentruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=konveyor.io,resources=agentruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.x-k8s.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;delete
 
 // Reconcile handles AgentRun reconciliation.
 //
@@ -151,7 +226,24 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	var run konveyoriov1alpha1.AgentRun
 	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+
+		// Owner references are the primary cascade. The label-driven sweep is
+		// the recovery path for a child whose owner reference was removed or
+		// never persisted. Confirm against the uncached API before deleting:
+		// child and parent informer events are not ordered across resource
+		// types, so a cache miss alone is not a safe deletion signal.
+		if r.apiReader != nil {
+			var current konveyoriov1alpha1.AgentRun
+			if err := r.apiReader.Get(ctx, req.NamespacedName, &current); err == nil {
+				return ctrl.Result{Requeue: true}, nil
+			} else if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, r.cleanupOrphanedRunResources(ctx, req.NamespacedName)
 	}
 
 	logger.V(1).Info("Reconciling AgentRun", "name", run.Name)
@@ -159,11 +251,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	original := run.DeepCopy()
 	run.Status.ObservedGeneration = run.Generation
 
-	// If the run is already terminal, nothing to do.
-	if run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseSucceeded ||
-		run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseFailed {
-		return ctrl.Result{}, nil
+	// A terminal run has no execution work left; the only remaining action is
+	// TTL-based garbage collection (delete once the run's lifetime elapses).
+	if isTerminalPhase(run.Status.Phase) {
+		return r.reconcileTTL(ctx, &run, original)
 	}
+
+	// Shed the legacy Ready condition on any live run created before it was
+	// removed from AgentRun (ADR 0018); the terminal outcome now lives on
+	// Succeeded, serving on ACPReady. Runs clean up on their next reconcile.
+	meta.RemoveStatusCondition(&run.Status.Conditions, ConditionTypeReady)
 
 	// Look up the referenced Agent.
 	var agent konveyoriov1alpha1.Agent
@@ -171,69 +268,100 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, agentKey, &agent); err != nil {
 		if errors.IsNotFound(err) {
 			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "AgentNotFound",
-				Message:            fmt.Sprintf("Agent %q not found", run.Spec.AgentRef),
-			})
+			setRunSucceeded(&run, metav1.ConditionFalse, "AgentNotFound",
+				fmt.Sprintf("Agent %q not found", run.Spec.AgentRef))
 			return r.patchRunStatus(ctx, &run, original)
 		}
 		return ctrl.Result{}, err
 	}
 
-	// Check that the Agent is Ready before proceeding.
+	// Check that the Agent is Ready before proceeding. The run is not
+	// failed — it waits — so Succeeded stays Unknown.
 	agentReady := meta.FindStatusCondition(agent.Status.Conditions, ConditionTypeReady)
 	if agentReady == nil || agentReady.Status != metav1.ConditionTrue {
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "AgentNotReady",
-			Message:            fmt.Sprintf("Agent %q is not Ready", run.Spec.AgentRef),
-		})
+		setRunSucceeded(&run, metav1.ConditionUnknown, "AgentNotReady",
+			fmt.Sprintf("Agent %q is not Ready", run.Spec.AgentRef))
 		return r.patchRunStatus(ctx, &run, original)
 	}
 
-	// Validate params against Agent declarations.
-	if err := r.validateParams(&run, &agent); err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "InvalidParams",
-			Message:            err.Error(),
-		})
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// Validate gateway selection against Agent's available gateways.
-	if err := r.validateGateway(&run, &agent); err != nil {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "InvalidGateway",
-			Message:            err.Error(),
-		})
-		return r.patchRunStatus(ctx, &run, original)
-	}
-
-	// If no Sandbox exists yet, create one.
+	// If no Sandbox exists yet, validate config against the Agent and
+	// create it. Validation runs only here, not on every reconcile of a
+	// live run: the Sandbox bakes in the rendered prompt/params at
+	// creation, so re-validating a running run against a since-edited
+	// Agent would change nothing except to spuriously fail it. (Immunity
+	// of not-yet-created workflow stages to Agent edits is tracked
+	// separately in #180.)
 	if run.Status.SandboxName == "" {
-		sandboxName, err := r.createSandbox(ctx, &run, &agent)
+		// Validate params against Agent declarations; the resolved params
+		// and substitution scopes feed createSandbox.
+		params, scopes, err := r.validateParams(&run, &agent)
 		if err != nil {
-			logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "SandboxCreationFailed",
-				Message:            fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err),
-			})
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidParams", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		// Validate gateway selection against Agent's available gateways.
+		if err := r.validateGateway(&run, &agent); err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidGateway", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		// Reject file mounts that collide with controller-managed mounts
+		// (or name no/both sources) before baking them into the Sandbox.
+		if err := validateFileMounts(run.Spec.FileMounts); err != nil {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidFileMounts", err.Error())
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		message, err := r.validateFileMountSources(ctx, &run)
+		if err != nil {
+			// User sources may arrive after the run, or lag in the informer
+			// cache. Keep the immutable run recoverable and retry with backoff,
+			// just as we do for a missing Gateway. User source watches do not
+			// enqueue this run, so returning the error drives the retry.
+			reason := "FileMountSourceUnavailable"
+			if errors.IsNotFound(err) {
+				reason = "FileMountSourceNotFound"
+			}
+			setRunSucceeded(&run, metav1.ConditionUnknown, reason, err.Error())
+			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {
+				return ctrl.Result{}, patchErr
+			}
+			return ctrl.Result{}, err
+		}
+		if message != "" {
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+			setRunSucceeded(&run, metav1.ConditionFalse, "InvalidFileMounts", message)
+			return r.patchRunStatus(ctx, &run, original)
+		}
+
+		sandboxName, err := r.createSandbox(ctx, &run, &agent, params, scopes)
+		if err != nil {
+			// A named Gateway that does not exist yet is treated like a
+			// missing container image (ImagePullBackOff): retriable, not
+			// terminal. It may be created moments after the run (a bundled
+			// GitOps apply of Gateway+Agent+AgentRun), or simply be lagging
+			// the informer cache. Failing terminally would strand a run whose
+			// spec is immutable -- the user could only delete and recreate to
+			// recover from what is really a timing issue. We surface a distinct
+			// GatewayNotFound reason so the wait is legible, then requeue with
+			// the same exponential backoff every transient createSandbox error
+			// uses.
+			reason := "SandboxCreationFailed"
+			msg := fmt.Sprintf("Failed to create Sandbox for Agent %q: %v", agent.Name, err)
+			if stderrors.Is(err, errGatewayNotFound) {
+				reason = "GatewayNotFound"
+				msg = fmt.Sprintf("Gateway %q not found; waiting for it to be created", run.Spec.Gateway)
+				logger.Info("AgentRun references a Gateway that does not exist yet; will retry", "agentRun", run.Name, "gateway", run.Spec.Gateway)
+			} else {
+				logger.Error(err, "Failed to create Sandbox", "agentRun", run.Name, "agent", agent.Name)
+			}
+			// Transient — the reconcile requeues with backoff — so the
+			// run is not yet failed; Succeeded stays Unknown.
+			setRunSucceeded(&run, metav1.ConditionUnknown, reason, msg)
 			// Patch status then return the error so controller-runtime
 			// requeues with exponential backoff.
 			if _, patchErr := r.patchRunStatus(ctx, &run, original); patchErr != nil {
@@ -243,13 +371,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		}
 		run.Status.SandboxName = sandboxName
 		run.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "SandboxCreated",
-			Message:            fmt.Sprintf("Sandbox %q created", sandboxName),
-		})
+		setRunSucceeded(&run, metav1.ConditionUnknown, "SandboxCreated",
+			fmt.Sprintf("Sandbox %q created", sandboxName))
 		return r.patchRunStatus(ctx, &run, original)
 	}
 
@@ -259,13 +382,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, sandboxKey, &sandbox); err != nil {
 		if errors.IsNotFound(err) {
 			run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-				Type:               ConditionTypeReady,
-				Status:             metav1.ConditionFalse,
-				ObservedGeneration: run.Generation,
-				Reason:             "SandboxNotFound",
-				Message:            fmt.Sprintf("Sandbox %q was deleted", run.Status.SandboxName),
-			})
+			setRunSucceeded(&run, metav1.ConditionFalse, "SandboxNotFound",
+				fmt.Sprintf("Sandbox %q was deleted", run.Status.SandboxName))
 			return r.patchRunStatus(ctx, &run, original)
 		}
 		return ctrl.Result{}, err
@@ -283,18 +401,25 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Update AgentRun phase and ACP readiness from the Sandbox and its pod.
-	r.updatePhaseFromSandbox(&run, &sandbox, pod)
+	// A non-zero requeue enforces the startup deadline without relying on a
+	// pod event that may never come (e.g. a pod stuck unschedulable).
+	requeueAfter := r.updatePhaseFromSandbox(ctx, &run, &sandbox, pod)
 
-	return r.patchRunStatus(ctx, &run, original)
+	if _, err := r.patchRunStatus(ctx, &run, original); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
-// validateParams checks that supplied params match Agent declarations.
+// validateParams checks that supplied params match Agent declarations
+// and returns the resolved params.json content and substitution scopes
+// for createSandbox to reuse.
 func (r *AgentRunReconciler) validateParams(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
-) error {
+) (paramsFile, map[string]map[string]string, error) {
 	// Build a map of declared params.
-	declared := make(map[string]konveyoriov1alpha1.AgentParam)
+	declared := make(map[string]konveyoriov1alpha1.Param)
 	for _, p := range agent.Spec.Params {
 		declared[p.Name] = p
 	}
@@ -302,7 +427,7 @@ func (r *AgentRunReconciler) validateParams(
 	// Check that all supplied params are declared.
 	for _, p := range run.Spec.Params {
 		if _, ok := declared[p.Name]; !ok {
-			return fmt.Errorf("param %q is not declared by Agent %q", p.Name, agent.Name)
+			return paramsFile{}, nil, fmt.Errorf("param %q is not declared by Agent %q", p.Name, agent.Name)
 		}
 	}
 
@@ -313,35 +438,87 @@ func (r *AgentRunReconciler) validateParams(
 	}
 	for _, p := range agent.Spec.Params {
 		if p.Required && p.Default == "" && !supplied[p.Name] {
-			return fmt.Errorf("required param %q not supplied", p.Name)
+			return paramsFile{}, nil, fmt.Errorf("required param %q not supplied", p.Name)
 		}
 	}
 
-	return nil
+	// Resolve params (type coercion) and validate prompt/instruction
+	// substitution up front. These are permanent config errors (a
+	// non-numeric value for a number param, a reference to an undeclared
+	// param), so surfacing them here fails the run terminally with
+	// InvalidParams rather than requeuing forever as
+	// SandboxCreationFailed. The resolved params and scopes are returned
+	// so createSandbox reuses them instead of recomputing.
+	params, scopes, err := buildParams(run, agent)
+	if err != nil {
+		return paramsFile{}, nil, err
+	}
+	if _, _, err := renderPromptAndInstructions(agent, run, scopes); err != nil {
+		return paramsFile{}, nil, err
+	}
+
+	return params, scopes, nil
 }
 
-// validateGateway checks that the selected gateway is in the Agent's
-// available gateway set. The Agent controller already watches Gateway
-// CRs and won't report Ready if a referenced Gateway is missing, so
-// the "Agent not Ready" check upstream catches dangling references.
-// This function validates the AgentRun's selection against the Agent's
-// declared set only — it does not re-verify the Gateway CR exists.
+// renderPromptAndInstructions substitutes $(scope.name) references in the
+// Agent prompt and the AgentRun instructions. It is the single place both
+// the up-front validation and the env-var construction resolve these two
+// fields, so a reference that passes validation renders identically at
+// sandbox creation.
+func renderPromptAndInstructions(
+	agent *konveyoriov1alpha1.Agent,
+	run *konveyoriov1alpha1.AgentRun,
+	scopes map[string]map[string]string,
+) (prompt, instructions string, err error) {
+	prompt, err = substitute(agent.Spec.Prompt, scopes)
+	if err != nil {
+		return "", "", fmt.Errorf("prompt: %w", err)
+	}
+	instructions, err = substitute(run.Spec.Instructions, scopes)
+	if err != nil {
+		return "", "", fmt.Errorf("instructions: %w", err)
+	}
+	return prompt, instructions, nil
+}
+
+// validateGateway resolves and validates the gateway for a run against the
+// Agent's declared gateway set, which is a presence-gated curation constraint:
+//   - Run names a gateway + Agent list non-empty: enforce membership (the
+//     architect has locked the Agent to specific gateways).
+//   - Run names a gateway + Agent list empty: accept it unconstrained. The
+//     Gateway CR must still exist and be Ready, which createSandbox enforces.
+//   - Run omits a gateway + Agent declares exactly one: default to it.
+//   - Run omits a gateway + Agent declares zero or multiple: error. The
+//     zero and multiple cases get distinct messages because the fix differs —
+//     name any gateway vs. pick one of the declared set.
+//
+// The Agent controller already watches Gateway CRs and won't report Ready if a
+// declared Gateway is missing, so dangling references in a non-empty list are
+// caught upstream by the "Agent not Ready" check.
 func (r *AgentRunReconciler) validateGateway(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
 ) error {
 	if run.Spec.Gateway == "" {
 		// Default to the Agent's only gateway when exactly one is
-		// declared. When multiple are available, require explicit
-		// selection so the run fails fast instead of dying at runtime
-		// on missing KONVEYOR_LLM_MODEL.
+		// declared. Otherwise require explicit selection so the run fails
+		// fast instead of dying at runtime on a missing gateway.
 		switch len(agent.Spec.Gateways) {
 		case 1:
 			run.Spec.Gateway = agent.Spec.Gateways[0].Ref
+			return nil
+		case 0:
+			return fmt.Errorf("agent %q declares no gateways; select one via spec.gateway",
+				agent.Name)
 		default:
 			return fmt.Errorf("agent %q declares %d gateways; select one via spec.gateway",
 				agent.Name, len(agent.Spec.Gateways))
 		}
+	}
+	// An empty Agent gateway list constrains nothing: accept the run's
+	// selection as-is. createSandbox verifies the Gateway CR exists and is
+	// Ready before it is used.
+	if len(agent.Spec.Gateways) == 0 {
 		return nil
 	}
 	for _, g := range agent.Spec.Gateways {
@@ -352,12 +529,194 @@ func (r *AgentRunReconciler) validateGateway(
 	return fmt.Errorf("gateway %q is not in Agent %q gateways", run.Spec.Gateway, agent.Name)
 }
 
+// validateFileMounts rejects file mounts that would break the pod: a
+// source that is neither (or both) Secret and ConfigMap, a non-absolute
+// path, invalid items paths, or mount paths that overlap each other or
+// a reserved mount (reservedMountPaths). These are permanent config errors, so the caller
+// fails the run terminally with InvalidFileMounts rather than requeuing.
+// The apiserver already enforces the xor rule (CEL) and mountPath
+// uniqueness (listMapKey); this re-checks defensively and owns the
+// collision rule, which CEL cannot express against Go-side constants.
+func validateFileMounts(mounts []konveyoriov1alpha1.FileMount) error {
+	seen := make([]string, 0, len(mounts))
+	for _, m := range mounts {
+		if (m.SecretName == "") == (m.ConfigMapName == "") {
+			return fmt.Errorf("file mount at %q must set exactly one of secretName or configMapName", m.MountPath)
+		}
+		if !path.IsAbs(m.MountPath) {
+			return fmt.Errorf("file mount path %q must be absolute", m.MountPath)
+		}
+		clean := path.Clean(m.MountPath)
+		for _, previous := range seen {
+			if pathsCollide(clean, previous) {
+				return fmt.Errorf("file mount path %q collides with file mount %q", m.MountPath, previous)
+			}
+		}
+		seen = append(seen, clean)
+		for _, item := range m.Items {
+			if item.Path == "" {
+				return fmt.Errorf("file mount at %q: items path must not be empty", m.MountPath)
+			}
+			if err := validateFileMountRelativePath(item.Path); err != nil {
+				return fmt.Errorf("file mount at %q: items path %q %w", m.MountPath, item.Path, err)
+			}
+		}
+		for _, reserved := range reservedMountPaths {
+			if pathsCollide(clean, reserved) {
+				return fmt.Errorf("file mount path %q collides with reserved mount %q", m.MountPath, reserved)
+			}
+		}
+	}
+	return nil
+}
+
+// validateFileMountSources returns a terminal validation message for missing
+// projected paths, and an error for source lookups that must be retried,
+// including NotFound: the source may be applied after the run.
+// This preflight checks keys only; source values remain opaque. It cannot
+// prevent a source from changing between validation and the kubelet mounting it.
+func (r *AgentRunReconciler) validateFileMountSources(ctx context.Context, run *konveyoriov1alpha1.AgentRun) (string, error) {
+	for _, m := range run.Spec.FileMounts {
+		var source client.Object
+		kind, name := "ConfigMap", m.ConfigMapName
+		if m.SecretName != "" {
+			kind, name = "Secret", m.SecretName
+			source = &corev1.Secret{}
+		} else {
+			source = &corev1.ConfigMap{}
+		}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: name}, source); err != nil {
+			return "", fmt.Errorf("file mount at %q from %s %q in namespace %q: %w",
+				m.MountPath, kind, name, run.Namespace, err)
+		}
+		keys := make(map[string]struct{})
+		switch obj := source.(type) {
+		case *corev1.Secret:
+			for key := range obj.Data {
+				keys[key] = struct{}{}
+			}
+		case *corev1.ConfigMap:
+			for key := range obj.Data {
+				keys[key] = struct{}{}
+			}
+			for key := range obj.BinaryData {
+				keys[key] = struct{}{}
+			}
+		}
+		if err := validateFileMountProjection(m, keys); err != nil {
+			return fmt.Sprintf("file mount at %q from %s %q: %v", m.MountPath, kind, name, err), nil
+		}
+	}
+	return "", nil
+}
+
+// validateFileMountProjection checks the paths the kubelet will project.
+// Items can rename keys into nested paths; subPath addresses that projected
+// tree, not necessarily a key in the source object.
+func validateFileMountProjection(m konveyoriov1alpha1.FileMount, keys map[string]struct{}) error {
+	projected := keys
+	if len(m.Items) > 0 {
+		projected = make(map[string]struct{}, len(m.Items))
+		for _, item := range m.Items {
+			if _, exists := keys[item.Key]; !exists {
+				return fmt.Errorf("items key %q not found", item.Key)
+			}
+			projected[path.Clean(item.Path)] = struct{}{}
+		}
+	}
+	if m.SubPath == "" {
+		return nil
+	}
+	if err := validateFileMountRelativePath(m.SubPath); err != nil {
+		return fmt.Errorf("subPath %q %w", m.SubPath, err)
+	}
+	subPath := path.Clean(m.SubPath)
+	if subPath == "." {
+		return nil
+	}
+	for projectedPath := range projected {
+		if isAncestorOrEqual(subPath, projectedPath) {
+			return nil
+		}
+	}
+	return fmt.Errorf("subPath %q not found in projected files", m.SubPath)
+}
+
+// validateFileMountRelativePath rejects absolute paths and traversal before
+// cleaning, so normalization cannot hide an invalid segment.
+func validateFileMountRelativePath(p string) error {
+	if path.IsAbs(p) {
+		return fmt.Errorf("must be relative")
+	}
+	if slices.Contains(strings.Split(p, "/"), "..") {
+		return fmt.Errorf("must not contain '..'")
+	}
+	return nil
+}
+
+// pathsCollide reports whether two absolute, cleaned paths conflict as
+// mount points: identical, one nested under the other, or one being an
+// ancestor of the other. Any of these would shadow a controller-managed
+// mount.
+func pathsCollide(a, b string) bool {
+	return isAncestorOrEqual(a, b) || isAncestorOrEqual(b, a)
+}
+
+// isAncestorOrEqual reports whether cleaned absolute path ancestor equals
+// or contains p. Root ("/") is an ancestor of every path; handling it
+// explicitly avoids the "//" prefix that ancestor+"/" would otherwise
+// produce.
+func isAncestorOrEqual(ancestor, p string) bool {
+	if ancestor == p || ancestor == "/" {
+		return true
+	}
+	return strings.HasPrefix(p, ancestor+"/")
+}
+
+// fileMountVolumes turns the run's file mounts into read-only Secret and
+// ConfigMap volumes plus the matching agent-container VolumeMounts. Volume
+// names are index-derived and so stable for a given spec (the spec is
+// immutable). Mount paths and sources are validated before the run reaches
+// sandbox creation.
+func fileMountVolumes(run *konveyoriov1alpha1.AgentRun) ([]corev1.Volume, []corev1.VolumeMount) {
+	if len(run.Spec.FileMounts) == 0 {
+		return nil, nil
+	}
+	volumes := make([]corev1.Volume, 0, len(run.Spec.FileMounts))
+	mounts := make([]corev1.VolumeMount, 0, len(run.Spec.FileMounts))
+	for i, m := range run.Spec.FileMounts {
+		volName := fmt.Sprintf("filemount-%d", i)
+		var src corev1.VolumeSource
+		if m.SecretName != "" {
+			src = corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: m.SecretName,
+				Items:      m.Items,
+			}}
+		} else {
+			src = corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: m.ConfigMapName},
+				Items:                m.Items,
+			}}
+		}
+		volumes = append(volumes, corev1.Volume{Name: volName, VolumeSource: src})
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      volName,
+			MountPath: path.Clean(m.MountPath),
+			SubPath:   m.SubPath,
+			ReadOnly:  true,
+		})
+	}
+	return volumes, mounts
+}
+
 // createSandbox creates the Sandbox CR, the ACP secret key Secret,
 // and returns the Sandbox name.
 func (r *AgentRunReconciler) createSandbox(
 	ctx context.Context,
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
+	params paramsFile,
+	scopes map[string]map[string]string,
 ) (string, error) {
 	sandboxName := run.Name
 
@@ -392,10 +751,22 @@ func (r *AgentRunReconciler) createSandbox(
 	// Update the run status with the secret ref.
 	run.Status.SecretKeyRef = &corev1.LocalObjectReference{Name: secretName}
 
-	// Build env vars: KONVEYOR_PARAM_* from params + ACP secret key + LLM credentials.
-	env, envFrom, err := r.buildEnvVars(ctx, run, agent, secretName)
+	// params and scopes were resolved and validated by validateParams
+	// (ADR 0009/0018) and passed in, so a coercion or unresolved-reference
+	// failure has already aborted the run terminally before this point.
+
+	// Build env vars: ACP secret key + LLM credentials + substituted
+	// prompt/instructions. Params ride params.json, not env.
+	env, envFrom, err := r.buildEnvVars(ctx, run, agent, secretName, scopes)
 	if err != nil {
 		return "", fmt.Errorf("building env vars: %w", err)
+	}
+
+	// Create the params.json ConfigMap and mount it at
+	// /run/konveyor/params.json.
+	paramsVolume, paramsMount, err := r.createParamsConfigMap(ctx, run, params)
+	if err != nil {
+		return "", fmt.Errorf("creating params ConfigMap: %w", err)
 	}
 
 	// Stage skill sources. Images become ImageVolumes, inline content becomes a
@@ -429,12 +800,16 @@ func (r *AgentRunReconciler) createSandbox(
 	skillsMount := corev1.VolumeMount{Name: skillsVolumeName, MountPath: skillsDir}
 	loaderMounts = append(loaderMounts, skillsMount)
 
-	volumeMounts := make([]corev1.VolumeMount, 0, 3) // skills, workspace, tmp
+	volumeMounts := make([]corev1.VolumeMount, 0, 4) // skills, params, workspace, tmp
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      skillsVolumeName,
 		MountPath: skillsDir,
 		ReadOnly:  true,
 	})
+
+	// params.json is mounted into the agent container only, not the loader.
+	volumes = append(volumes, paramsVolume)
+	volumeMounts = append(volumeMounts, paramsMount)
 
 	// Add workspace EmptyDir.
 	volumes = append(volumes, corev1.Volume{
@@ -447,7 +822,7 @@ func (r *AgentRunReconciler) createSandbox(
 	})
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      workspaceVolumeName,
-		MountPath: "/workspace",
+		MountPath: workspaceDir,
 	})
 
 	// Writable /tmp for tools that create temp files at runtime.
@@ -461,8 +836,16 @@ func (r *AgentRunReconciler) createSandbox(
 	})
 	volumeMounts = append(volumeMounts, corev1.VolumeMount{
 		Name:      tmpVolumeName,
-		MountPath: "/tmp",
+		MountPath: tmpDir,
 	})
+
+	// User-attached Secret/ConfigMap file mounts (read-only). Their paths
+	// were checked against reservedMountPaths in validateFileMounts before
+	// the run reached sandbox creation, so they cannot shadow the mounts
+	// added above.
+	fmVolumes, fmMounts := fileMountVolumes(run)
+	volumes = append(volumes, fmVolumes...)
+	volumeMounts = append(volumeMounts, fmMounts...)
 
 	// Create the Sandbox CR.
 	serviceEnabled := true
@@ -478,63 +861,72 @@ func (r *AgentRunReconciler) createSandbox(
 			},
 		},
 		Spec: sandboxv1beta1.SandboxSpec{
-			PodTemplate: sandboxv1beta1.PodTemplate{
-				// Agent Sandbox v0.5.0 copies only PodTemplate metadata
-				// onto the pod, so mirror the identifying labels here to
-				// make the pod discoverable by AgentRun / Agent name.
-				ObjectMeta: sandboxv1beta1.PodMetadata{
-					Labels: map[string]string{
-						labelAgentRun: run.Name,
-						labelAgent:    agent.Name,
-					},
-				},
-				Spec: corev1.PodSpec{
-					// Never restart — a failed container must reach a terminal
-					// phase so the AgentRun (and workflow stage) can observe
-					// the failure. OnFailure would cause infinite crashloops
-					// (#51). The tradeoff is that transient failures (image
-					// pull blips, node eviction) are not retried. Bounded
-					// retry (backoffLimit-style) can be added later if needed.
-					RestartPolicy: corev1.RestartPolicyNever,
-					InitContainers: []corev1.Container{
-						skillLoaderContainer(r.SkillLoaderImage, skillSrc, loaderMounts),
-					},
-					Containers: []corev1.Container{
-						{
-							Name:  agentContainerName,
-							Image: agent.Spec.Image,
-							Env:   env,
-							// User-specified sources last: for duplicate
-							// keys across envFrom sources the last wins,
-							// so run.spec.envFrom overrides provider
-							// credentials.
-							EnvFrom:      append(envFrom, run.Spec.EnvFrom...),
-							VolumeMounts: volumeMounts,
-							Ports: []corev1.ContainerPort{{
-								Name:          acpPortName,
-								ContainerPort: acpPort,
-								Protocol:      corev1.ProtocolTCP,
-							}},
-							// The agent process binds the ACP port only once
-							// it can serve (the harness starts goose, waits
-							// for it, then listens), so an accepting socket
-							// IS readiness. Without this probe the pod is
-							// Ready the instant the process starts and
-							// clients dial into a not-yet-listening port.
-							ReadinessProbe: &corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									TCPSocket: &corev1.TCPSocketAction{
-										Port: intstr.FromInt32(acpPort),
-									},
-								},
-								PeriodSeconds: acpProbePeriodSeconds,
-							},
+			SandboxBlueprint: sandboxv1beta1.SandboxBlueprint{
+				PodTemplate: sandboxv1beta1.PodTemplate{
+					// Agent Sandbox copies only PodTemplate metadata
+					// onto the pod, so mirror the identifying labels here to
+					// make the pod discoverable by AgentRun / Agent name.
+					ObjectMeta: sandboxv1beta1.PodMetadata{
+						Labels: map[string]string{
+							labelManagedBy: managedByLabel,
+							labelAgentRun:  run.Name,
+							labelAgent:     agent.Name,
 						},
 					},
-					Volumes: volumes,
+					Spec: corev1.PodSpec{
+						// Never restart — a failed container must reach a terminal
+						// phase so the AgentRun (and workflow stage) can observe
+						// the failure. OnFailure would cause infinite crashloops
+						// (#51). The tradeoff is that transient failures (image
+						// pull blips, node eviction) are not retried. Bounded
+						// retry (backoffLimit-style) can be added later if needed.
+						RestartPolicy: corev1.RestartPolicyNever,
+						InitContainers: []corev1.Container{
+							skillLoaderContainer(r.SkillLoaderImage, skillSrc, loaderMounts),
+						},
+						Containers: []corev1.Container{
+							{
+								Name:  agentContainerName,
+								Image: agent.Spec.Image,
+								Env:   env,
+								// User-specified sources last: for duplicate
+								// keys across envFrom sources the last wins,
+								// so run.spec.envFrom overrides provider
+								// credentials.
+								EnvFrom:      append(envFrom, run.Spec.EnvFrom...),
+								VolumeMounts: volumeMounts,
+								Ports: []corev1.ContainerPort{{
+									Name:          acpPortName,
+									ContainerPort: acpPort,
+									Protocol:      corev1.ProtocolTCP,
+								}},
+								// The agent process binds the ACP port only once
+								// it can serve (the harness starts goose, waits
+								// for it, then listens), so an accepting socket
+								// IS readiness. Without this probe the pod is
+								// Ready the instant the process starts and
+								// clients dial into a not-yet-listening port.
+								ReadinessProbe: &corev1.Probe{
+									ProbeHandler: corev1.ProbeHandler{
+										TCPSocket: &corev1.TCPSocketAction{
+											Port: intstr.FromInt32(acpPort),
+										},
+									},
+									PeriodSeconds: acpProbePeriodSeconds,
+								},
+								// The harness writes a machine-readable failure
+								// payload to the default termination-log path; the
+								// controller lifts it onto AgentRunStatus. Fall back
+								// to the last log lines if the harness dies before
+								// writing (#143).
+								TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+							},
+						},
+						Volumes: volumes,
+					},
 				},
+				Service: &serviceEnabled,
 			},
-			Service: &serviceEnabled,
 		},
 	}
 
@@ -549,6 +941,65 @@ func (r *AgentRunReconciler) createSandbox(
 	return sandboxName, nil
 }
 
+// createParamsConfigMap renders params.json, creates (or leaves in
+// place) a ConfigMap owned by the run, and returns the Volume and
+// VolumeMount that surface it at /run/konveyor/params.json in the
+// Sandbox. The ConfigMap is named <run>-params and is a non-secret
+// vehicle (credentials ride the gateway envFrom path, not params.json).
+func (r *AgentRunReconciler) createParamsConfigMap(
+	ctx context.Context,
+	run *konveyoriov1alpha1.AgentRun,
+	params paramsFile,
+) (corev1.Volume, corev1.VolumeMount, error) {
+	content, err := renderParamsFile(params)
+	if err != nil {
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("rendering params.json: %w", err)
+	}
+
+	// Derive the mount directory and ConfigMap key from the single
+	// contract constant so the two cannot drift (ADR 0009).
+	paramsDir := path.Dir(ParamsFilePath)  // /run/konveyor
+	paramsKey := path.Base(ParamsFilePath) // params.json
+
+	cmName := run.Name + "-params"
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      cmName,
+		Namespace: run.Namespace,
+	}}
+	// CreateOrUpdate rather than a bare Create: createSandbox can fail and
+	// retry, and the rendered content depends on the Agent's params and
+	// execution, so an AlreadyExists swallow could leave a stale params.json
+	// next to a freshly rendered prompt. Matches createInlineSkillConfigMaps.
+	if _, err := ctrl.CreateOrUpdate(ctx, r.Client, cm, func() error {
+		cm.Labels = map[string]string{
+			labelManagedBy: managedByLabel,
+			labelAgentRun:  run.Name,
+		}
+		cm.Data = map[string]string{paramsKey: string(content)}
+		return ctrl.SetControllerReference(run, cm, r.Scheme)
+	}); err != nil {
+		return corev1.Volume{}, corev1.VolumeMount{}, fmt.Errorf("creating params ConfigMap: %w", err)
+	}
+
+	volume := corev1.Volume{
+		Name: paramsVolumeName,
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: cmName},
+				Items: []corev1.KeyToPath{
+					{Key: paramsKey, Path: paramsKey},
+				},
+			},
+		},
+	}
+	mount := corev1.VolumeMount{
+		Name:      paramsVolumeName,
+		MountPath: paramsDir,
+		ReadOnly:  true,
+	}
+	return volume, mount, nil
+}
+
 // buildEnvVars constructs the env var list for the Sandbox container, plus
 // envFrom sources for the gateway's credential Secret when it is exposed
 // whole (credentialRef without a key, e.g. AWS SigV4).
@@ -557,28 +1008,15 @@ func (r *AgentRunReconciler) buildEnvVars(
 	run *konveyoriov1alpha1.AgentRun,
 	agent *konveyoriov1alpha1.Agent,
 	acpSecretName string,
+	scopes map[string]map[string]string,
 ) ([]corev1.EnvVar, []corev1.EnvFromSource, error) {
 	var env []corev1.EnvVar
 	var envFrom []corev1.EnvFromSource
 
-	// Build KONVEYOR_PARAM_* env vars from params (supplied values
-	// override defaults from the Agent).
-	supplied := make(map[string]string)
-	for _, p := range run.Spec.Params {
-		supplied[p.Name] = p.Value
-	}
-	for _, p := range agent.Spec.Params {
-		value, ok := supplied[p.Name]
-		if !ok {
-			value = p.Default
-		}
-		if value != "" {
-			env = append(env, corev1.EnvVar{
-				Name:  "KONVEYOR_PARAM_" + strings.ToUpper(p.Name),
-				Value: value,
-			})
-		}
-	}
+	// Parameters are no longer injected as KONVEYOR_PARAM_* env vars.
+	// They are delivered in /run/konveyor/params.json (ADR 0009) and
+	// referenced in prompt text via $(agent.<name>) / $(workflow.<name>),
+	// substituted by the controller below.
 
 	// ACP secret key. The harness maps this to the runtime-specific
 	// env var (e.g. GOOSE_SERVER__SECRET_KEY for Goose).
@@ -592,27 +1030,46 @@ func (r *AgentRunReconciler) buildEnvVars(
 		},
 	})
 
-	// Instructions (if any).
+	// Prompt and instructions, with $(scope.name) substitution. Resolved
+	// through the same helper the up-front validation uses so the two
+	// paths cannot diverge.
+	prompt, instructions, err := renderPromptAndInstructions(agent, run, scopes)
+	if err != nil {
+		return nil, nil, err
+	}
 	if run.Spec.Instructions != "" {
 		env = append(env, corev1.EnvVar{
 			Name:  "KONVEYOR_INSTRUCTIONS",
-			Value: run.Spec.Instructions,
+			Value: instructions,
 		})
 	}
-
-	// Agent prompt.
 	if agent.Spec.Prompt != "" {
 		env = append(env, corev1.EnvVar{
 			Name:  "KONVEYOR_PROMPT",
-			Value: agent.Spec.Prompt,
+			Value: prompt,
 		})
 	}
+
+	// Git commit identity. AgentRun overrides Agent per field; unset
+	// fields resolve to empty. Both vars are always emitted, even when
+	// empty: container env takes precedence over envFrom, so an explicit
+	// (empty) value here overrides any KONVEYOR_GIT_AUTHOR_* smuggled in
+	// through run.Spec.EnvFrom, and an empty pair makes the harness fall
+	// back to its default identity rather than a forged or half-set one.
+	gitName, gitEmail := resolveGitIdentity(agent, run)
+	env = append(env,
+		corev1.EnvVar{Name: gitAuthorNameEnv, Value: gitName},
+		corev1.EnvVar{Name: gitAuthorEmailEnv, Value: gitEmail},
+	)
 
 	// Gateway credential mounting. One run = one gateway = one model.
 	if run.Spec.Gateway != "" {
 		var gateway konveyoriov1alpha1.Gateway
 		gwKey := types.NamespacedName{Namespace: run.Namespace, Name: run.Spec.Gateway}
 		if err := r.Get(ctx, gwKey, &gateway); err != nil {
+			if errors.IsNotFound(err) {
+				return nil, nil, fmt.Errorf("%w: %q", errGatewayNotFound, run.Spec.Gateway)
+			}
 			return nil, nil, fmt.Errorf("looking up Gateway %q: %w", run.Spec.Gateway, err)
 		}
 		// Verify the Gateway is currently Ready. Agent readiness can
@@ -657,10 +1114,38 @@ func (r *AgentRunReconciler) buildEnvVars(
 		}
 	}
 
-	// Pass through user-specified env vars.
-	env = append(env, run.Spec.Env...)
+	// Pass through user-specified env vars, but never let them override the
+	// controller-managed git commit identity. A raw KONVEYOR_GIT_AUTHOR_*
+	// in run.Spec.Env would otherwise win by last-key-wins and bypass
+	// GitConfig's validation, forging authorship or leaving a half-set
+	// identity (one field user-supplied, the other the harness default).
+	for _, e := range run.Spec.Env {
+		if e.Name == gitAuthorNameEnv || e.Name == gitAuthorEmailEnv {
+			continue
+		}
+		env = append(env, e)
+	}
 
 	return env, envFrom, nil
+}
+
+// resolveGitIdentity computes the git commit identity (name, email) for a
+// run. Name and email are one indivisible identity: an AgentRun's
+// GitConfig replaces the Agent's wholesale rather than merging per field
+// (a both-or-neither CRD constraint guarantees each GitConfig carries
+// both). Empty return values mean "not configured" — the harness
+// supplies its own default in that case.
+func resolveGitIdentity(
+	agent *konveyoriov1alpha1.Agent,
+	run *konveyoriov1alpha1.AgentRun,
+) (name, email string) {
+	if gc := run.Spec.GitConfig; gc != nil {
+		return gc.UserName, gc.UserEmail
+	}
+	if gc := agent.Spec.GitConfig; gc != nil {
+		return gc.UserName, gc.UserEmail
+	}
+	return "", ""
 }
 
 // skillSources is the staged result of resolving an Agent's skill refs.
@@ -1012,25 +1497,20 @@ func skillLoaderContainer(image string, sources *skillSources, mounts []corev1.V
 // separate fact — the sandbox pod's tcpSocket:4000 readiness probe feeding
 // the Sandbox Ready condition — and is reported as the ACPReady condition,
 // so a client dials on ACPReady=True, never on Phase.
+//
+// It returns the duration after which the run should be re-reconciled, or
+// 0 for none. A non-zero requeue enforces the startup deadline for a pod
+// that is slow to start without depending on a pod event.
 func (r *AgentRunReconciler) updatePhaseFromSandbox(
+	ctx context.Context,
 	run *konveyoriov1alpha1.AgentRun,
 	sandbox *sandboxv1beta1.Sandbox,
 	pod *corev1.Pod,
-) {
+) time.Duration {
 	// Check Sandbox conditions for Finished state.
 	for _, cond := range sandbox.Status.Conditions {
-		if cond.Type == "Finished" && cond.Status == metav1.ConditionTrue {
-			now := metav1.Now()
-			run.Status.CompletionTime = &now
-			if run.Status.StartTime == nil {
-				// Finished before we ever saw the pod running: the pod's
-				// own start, else the Sandbox creation, so Duration still
-				// reflects the run's wall time.
-				start := podStartTime(pod, sandbox.CreationTimestamp)
-				run.Status.StartTime = &start
-			}
-			duration := int64(now.Sub(run.Status.StartTime.Time).Seconds())
-			run.Status.Duration = &duration
+		if cond.Type == sandboxConditionFinished && cond.Status == metav1.ConditionTrue {
+			stampCompletion(run, pod, sandbox)
 			meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
 				Type:               konveyoriov1alpha1.AgentRunConditionACPReady,
 				Status:             metav1.ConditionFalse,
@@ -1039,26 +1519,17 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 				Message:            "The run has finished; its ACP endpoint is gone",
 			})
 
-			if cond.Reason == sandboxFinishedReasonSucceeded {
-				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
-				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:               ConditionTypeReady,
-					Status:             metav1.ConditionTrue,
-					ObservedGeneration: run.Generation,
-					Reason:             sandboxFinishedReasonSucceeded,
-					Message:            "Agent run completed successfully",
-				})
-			} else {
-				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-				meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-					Type:               ConditionTypeReady,
-					Status:             metav1.ConditionFalse,
-					ObservedGeneration: run.Generation,
-					Reason:             "Failed",
-					Message:            fmt.Sprintf("Sandbox finished with reason: %s", cond.Reason),
-				})
+			// Capture the harness's opaque termination data (usage/cost
+			// report). Stored verbatim, never interpreted (ADR 0018).
+			if td := terminationDataFromPod(pod); td != nil {
+				run.Status.TerminationData = td
 			}
-			return
+
+			// The harness may also write a human-readable failure message to
+			// the termination log (e.g. a non-git source, #143); surface it
+			// on the failure outcome, preferring it over the generic reason.
+			r.setTerminalOutcome(run, pod, cond.Reason, r.lookupTerminationMessage(ctx, run))
+			return 0
 		}
 	}
 
@@ -1086,33 +1557,271 @@ func (r *AgentRunReconciler) updatePhaseFromSandbox(
 	// pod is Running. One-way — a later pod state change does not regress
 	// a Running run.
 	if run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseRunning {
-		return
+		return 0
 	}
+
+	// Fail-fast: a pod that cannot start (image pull, container config, or
+	// crash loop) will never reach Running, so fail the run now instead of
+	// waiting on it. Checked before the pod-phase gate because a container
+	// stuck in CrashLoopBackOff can still put the pod in the Running phase.
+	if reason, message, fatal := podStartupProblem(pod); fatal {
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+		stampCompletion(run, pod, sandbox)
+		setRunSucceeded(run, metav1.ConditionFalse, reason, message)
+		return 0
+	}
+
 	if pod == nil || pod.Status.Phase != corev1.PodRunning {
-		run.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
-		podPhase := "not created yet"
-		if pod != nil {
-			podPhase = string(pod.Status.Phase)
+		// The pod is not running yet. If a startup deadline is configured
+		// and has elapsed, fail the run; otherwise stay Pending and requeue
+		// so the deadline is enforced even absent a further pod event.
+		if deadline, ok := r.effectiveStartupDeadline(run); ok {
+			remaining := deadline - time.Since(sandbox.CreationTimestamp.Time)
+			if remaining <= 0 {
+				run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				stampCompletion(run, pod, sandbox)
+				detail := podStartupDetail(pod)
+				setRunSucceeded(run, metav1.ConditionFalse,
+					konveyoriov1alpha1.AgentRunReasonStartupDeadlineExceeded,
+					fmt.Sprintf("Pod %q did not reach a running state within %s: %s",
+						sandbox.Name, deadline, detail))
+				return 0
+			}
+			run.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
+			setRunSucceeded(run, metav1.ConditionUnknown, "PodNotRunning",
+				fmt.Sprintf("Waiting for sandbox pod %q to run (%s)",
+					sandbox.Name, podStartupDetail(pod)))
+			return remaining
 		}
-		meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: run.Generation,
-			Reason:             "PodNotRunning",
-			Message:            fmt.Sprintf("Waiting for sandbox pod %q to run (%s)", sandbox.Name, podPhase),
-		})
-		return
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
+		setRunSucceeded(run, metav1.ConditionUnknown, "PodNotRunning",
+			fmt.Sprintf("Waiting for sandbox pod %q to run (%s)",
+				sandbox.Name, podStartupDetail(pod)))
+		return 0
 	}
 	run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseRunning
 	start := podStartTime(pod, sandbox.CreationTimestamp)
 	run.Status.StartTime = &start
+	setRunSucceeded(run, metav1.ConditionUnknown, konveyoriov1alpha1.AgentRunReasonRunning,
+		"Agent is running")
+	return 0
+}
+
+// stampCompletion records the terminal timing on a finished run: the
+// completion time now, a start-time fallback for runs that finished before
+// the pod was ever seen running, and the resulting duration.
+func stampCompletion(run *konveyoriov1alpha1.AgentRun, pod *corev1.Pod, sandbox *sandboxv1beta1.Sandbox) {
+	now := metav1.Now()
+	run.Status.CompletionTime = &now
+	if run.Status.StartTime == nil {
+		// Finished before we ever saw the pod running: the pod's own start,
+		// else the Sandbox creation, so Duration still reflects wall time.
+		start := podStartTime(pod, sandbox.CreationTimestamp)
+		run.Status.StartTime = &start
+	}
+	duration := int64(now.Sub(run.Status.StartTime.Time).Seconds())
+	run.Status.Duration = &duration
+}
+
+// fatalWaitingReasons are container Waiting.Reason values that mean the pod
+// will not start without intervention: the image cannot be pulled or named,
+// the container cannot be configured, or it crashes on every start. They are
+// settled states — kubelet has already retried into a back-off, or the
+// config is permanently wrong — so the run is failed rather than waited on.
+//
+// CrashLoopBackOff is effectively unreachable today: sandbox pods run with
+// RestartPolicyNever, so a crashing container terminates (surfaced through the
+// Sandbox Finished / setTerminalOutcome path) rather than entering a waiting
+// back-off. It is kept as a guard against a future restart-policy change.
+var fatalWaitingReasons = map[string]bool{
+	"ImagePullBackOff":           true,
+	"InvalidImageName":           true,
+	"CreateContainerConfigError": true,
+	"CrashLoopBackOff":           true,
+}
+
+// podStartupProblem inspects a not-yet-running pod for a fatal startup
+// failure. It returns a machine reason (the kubelet's own waiting reason),
+// a human message naming the container, and fatal=true when the pod will
+// not start on its own. Init containers are checked first: the skill loader
+// runs there, and a bad loader image never lets the agent container start.
+func podStartupProblem(pod *corev1.Pod) (reason, message string, fatal bool) {
+	if pod == nil {
+		return "", "", false
+	}
+	statuses := make([]corev1.ContainerStatus, 0,
+		len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, cs := range statuses {
+		w := cs.State.Waiting
+		if w == nil || !fatalWaitingReasons[w.Reason] {
+			continue
+		}
+		msg := fmt.Sprintf("container %q is stuck on %s", cs.Name, w.Reason)
+		if w.Message != "" {
+			msg = fmt.Sprintf("%s: %s", msg, w.Message)
+		}
+		return w.Reason, msg, true
+	}
+	return "", "", false
+}
+
+// podStartupDetail returns a short human description of why a pod is not
+// running yet, for the deadline-exceeded and Pending messages. It surfaces
+// an unschedulable condition or a container's current waiting reason, and
+// otherwise falls back to the pod phase.
+func podStartupDetail(pod *corev1.Pod) string {
+	if pod == nil {
+		return "pod not created yet"
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
+			c.Reason == corev1.PodReasonUnschedulable {
+			if c.Message != "" {
+				return fmt.Sprintf("unschedulable: %s", c.Message)
+			}
+			return "unschedulable"
+		}
+	}
+	statuses := make([]corev1.ContainerStatus, 0,
+		len(pod.Status.InitContainerStatuses)+len(pod.Status.ContainerStatuses))
+	statuses = append(statuses, pod.Status.InitContainerStatuses...)
+	statuses = append(statuses, pod.Status.ContainerStatuses...)
+	for _, cs := range statuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason != "" {
+			return fmt.Sprintf("container %q: %s", cs.Name, cs.State.Waiting.Reason)
+		}
+	}
+	return fmt.Sprintf("pod phase %s", pod.Status.Phase)
+}
+
+// effectiveStartupDeadline returns the run's startup deadline: its own
+// spec.startupDeadlineSeconds when set to a positive value, else the
+// controller default. ok is false when no deadline applies.
+func (r *AgentRunReconciler) effectiveStartupDeadline(run *konveyoriov1alpha1.AgentRun) (time.Duration, bool) {
+	if run.Spec.StartupDeadlineSeconds != nil && *run.Spec.StartupDeadlineSeconds > 0 {
+		return time.Duration(*run.Spec.StartupDeadlineSeconds) * time.Second, true
+	}
+	if r.DefaultStartupDeadline != nil && *r.DefaultStartupDeadline > 0 {
+		return *r.DefaultStartupDeadline, true
+	}
+	return 0, false
+}
+
+// Harness exit-code contract (ADR 0011/0018). Additional codes may be
+// added later; any non-zero code stops a workflow.
+const (
+	harnessExitSucceeded    = 0
+	harnessExitLimitReached = 2
+)
+
+// setTerminalOutcome sets the AgentRun's terminal phase and the
+// Succeeded condition from the harness exit code (ADR 0018), falling
+// back to the Sandbox's coarse Finished reason when the pod's container
+// exit code is unavailable.
+//
+// Note the exit-2 remap: a limit-reached run exits non-zero, so the pod
+// is Failed and the Sandbox reports a non-PodSucceeded reason — the
+// controller must read the container exit code to tell "stopped on
+// budget" (Succeeded=False, LimitReached) from a genuine error
+// (Succeeded=False, Failed). Only exit 0 is a clean success.
+//
+// failureMessage, when non-empty, is the harness's human-readable
+// termination message (e.g. a non-git source, #143); it is preferred over
+// the generic reason on a failure outcome.
+func (r *AgentRunReconciler) setTerminalOutcome(
+	run *konveyoriov1alpha1.AgentRun,
+	pod *corev1.Pod,
+	sandboxReason string,
+	failureMessage string,
+) {
+	exitCode, haveExit := agentExitCode(pod)
+
+	switch {
+	case haveExit && exitCode == harnessExitLimitReached:
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+		setRunSucceeded(run, metav1.ConditionFalse, konveyoriov1alpha1.AgentRunReasonLimitReached,
+			"Execution limit reached; the agent committed a handoff")
+	case (haveExit && exitCode == harnessExitSucceeded) ||
+		(!haveExit && sandboxReason == sandboxFinishedReasonSucceeded):
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseSucceeded
+		setRunSucceeded(run, metav1.ConditionTrue, konveyoriov1alpha1.AgentRunReasonSucceeded,
+			"Agent run completed successfully")
+	default:
+		run.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+		message := fmt.Sprintf("Sandbox finished with reason: %s", sandboxReason)
+		if haveExit {
+			message = fmt.Sprintf("Agent exited with code %d", exitCode)
+		}
+		// Prefer the harness's human-readable failure message when present.
+		if failureMessage != "" {
+			message = failureMessage
+		}
+		setRunSucceeded(run, metav1.ConditionFalse, konveyoriov1alpha1.AgentRunReasonFailed, message)
+	}
+}
+
+// setRunSucceeded sets the AgentRun's Succeeded condition — the single
+// terminal-outcome signal (ADR 0018). Unknown while the run is still in
+// progress, True/False once it ends. AgentRun carries no Ready condition;
+// every progress and outcome state rides Succeeded (serving is the
+// separate ACPReady condition).
+func setRunSucceeded(
+	run *konveyoriov1alpha1.AgentRun,
+	status metav1.ConditionStatus,
+	reason, message string,
+) {
 	meta.SetStatusCondition(&run.Status.Conditions, metav1.Condition{
-		Type:               ConditionTypeReady,
-		Status:             metav1.ConditionFalse,
+		Type:               konveyoriov1alpha1.AgentRunConditionSucceeded,
+		Status:             status,
 		ObservedGeneration: run.Generation,
-		Reason:             "Running",
-		Message:            "Agent is running",
+		Reason:             reason,
+		Message:            message,
 	})
+}
+
+// terminationDataFromPod returns the agent container's termination message
+// as an opaque RawExtension for AgentRun.status.terminationData, but only
+// when it is a JSON object. The CRD types terminationData as an object, so
+// an array or scalar message would get the whole status patch (and
+// setTerminalOutcome with it) rejected; unmarshalling into a map succeeds
+// only for objects. Returns nil when there is no termination, the message
+// is empty, or it is not a JSON object.
+func terminationDataFromPod(pod *corev1.Pod) *runtime.RawExtension {
+	term := agentContainerTermination(pod)
+	if term == nil || term.Message == "" {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal([]byte(term.Message), &obj) != nil {
+		return nil
+	}
+	return &runtime.RawExtension{Raw: []byte(term.Message)}
+}
+
+// agentContainerTermination returns the terminated state of the agent
+// container, or nil if the pod is absent or the container has not
+// terminated.
+func agentContainerTermination(pod *corev1.Pod) *corev1.ContainerStateTerminated {
+	if pod == nil {
+		return nil
+	}
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.Name == agentContainerName && cs.State.Terminated != nil {
+			return cs.State.Terminated
+		}
+	}
+	return nil
+}
+
+// agentExitCode returns the agent container's exit code and whether it
+// was available.
+func agentExitCode(pod *corev1.Pod) (int32, bool) {
+	if term := agentContainerTermination(pod); term != nil {
+		return term.ExitCode, true
+	}
+	return 0, false
 }
 
 // podStartTime is when the agent container started running, else when the
@@ -1131,6 +1840,43 @@ func podStartTime(pod *corev1.Pod, fallback metav1.Time) metav1.Time {
 	return fallback
 }
 
+// lookupTerminationMessage lists the run's pods and returns the agent
+// container's terminated-state message, or "" if none is available. Errors
+// listing pods are swallowed — the termination payload is best-effort detail
+// and must never block the phase update.
+func (r *AgentRunReconciler) lookupTerminationMessage(
+	ctx context.Context,
+	run *konveyoriov1alpha1.AgentRun,
+) string {
+	var pods corev1.PodList
+	if err := r.apiReader.List(ctx, &pods,
+		client.InNamespace(run.Namespace),
+		client.MatchingLabels{labelAgentRun: run.Name},
+	); err != nil {
+		log.FromContext(ctx).V(1).Info("listing pods for termination message failed",
+			"agentRun", run.Name, "error", err)
+		return ""
+	}
+	return podTerminationMessage(pods.Items)
+}
+
+// podTerminationMessage returns the "agent" container's terminated-state
+// message across the given pods, or "" if no such terminated container is
+// found. It is a pure function to keep the extraction logic unit-testable.
+func podTerminationMessage(pods []corev1.Pod) string {
+	for i := range pods {
+		for _, cs := range pods[i].Status.ContainerStatuses {
+			if cs.Name != agentContainerName {
+				continue
+			}
+			if cs.State.Terminated != nil && cs.State.Terminated.Message != "" {
+				return cs.State.Terminated.Message
+			}
+		}
+	}
+	return ""
+}
+
 // patchRunStatus patches the AgentRun status.
 func (r *AgentRunReconciler) patchRunStatus(
 	ctx context.Context,
@@ -1141,6 +1887,64 @@ func (r *AgentRunReconciler) patchRunStatus(
 		log.FromContext(ctx).Error(err, "Failed to patch AgentRun status",
 			"agentRun", run.Name)
 		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
+// isTerminalPhase reports whether an AgentRun phase is terminal — the run has
+// finished and no further execution work happens.
+func isTerminalPhase(phase konveyoriov1alpha1.AgentRunPhase) bool {
+	return phase == konveyoriov1alpha1.AgentRunPhaseSucceeded ||
+		phase == konveyoriov1alpha1.AgentRunPhaseFailed
+}
+
+// effectiveTTL resolves a terminal AgentRun's lifetime: the run's own
+// spec.ttlSecondsAfterFinished wins, then the controller's
+// DefaultTTLAfterFinished. The bool is false when neither is set, meaning GC
+// is disabled and the run is kept until deleted manually.
+func (r *AgentRunReconciler) effectiveTTL(run *konveyoriov1alpha1.AgentRun) (time.Duration, bool) {
+	if run.Spec.TTLSecondsAfterFinished != nil {
+		return time.Duration(*run.Spec.TTLSecondsAfterFinished) * time.Second, true
+	}
+	if r.DefaultTTLAfterFinished != nil {
+		return *r.DefaultTTLAfterFinished, true
+	}
+	return 0, false
+}
+
+// reconcileTTL garbage-collects a terminal AgentRun once its TTL elapses.
+// With no effective TTL the run is kept. The finish anchor is CompletionTime;
+// a terminal run that never recorded one (e.g. a validation failure before a
+// Sandbox existed) gets it stamped now so expiry is deterministic across
+// controller restarts. Before the TTL elapses the reconcile is requeued for
+// the remaining time; once it has, the run is deleted — cascading to
+// everything it owns (Sandbox, pod, per-run ConfigMaps/Secrets) via owner
+// references.
+func (r *AgentRunReconciler) reconcileTTL(
+	ctx context.Context,
+	run *konveyoriov1alpha1.AgentRun,
+	original *konveyoriov1alpha1.AgentRun,
+) (ctrl.Result, error) {
+	ttl, ok := r.effectiveTTL(run)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
+
+	// Anchor the clock: a terminal run with no CompletionTime records one now.
+	if run.Status.CompletionTime == nil {
+		now := metav1.Now()
+		run.Status.CompletionTime = &now
+		return r.patchRunStatus(ctx, run, original)
+	}
+
+	if remaining := time.Until(run.Status.CompletionTime.Add(ttl)); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	log.FromContext(ctx).Info("Deleting finished AgentRun (TTL elapsed)",
+		"agentRun", run.Name, "ttl", ttl.String(), "completionTime", run.Status.CompletionTime)
+	if err := r.Delete(ctx, run); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -1156,6 +1960,10 @@ func generateSecretKey() (string, error) {
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Direct API reader for the best-effort pod termination-message lookup,
+	// so we don't start a cluster-wide Pod informer via the manager cache.
+	r.apiReader = mgr.GetAPIReader()
+
 	// Index AgentRuns by agentRef for efficient reverse lookup when
 	// an Agent changes.
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -1174,6 +1982,26 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&konveyoriov1alpha1.AgentRun{}).
 		Owns(&sandboxv1beta1.Sandbox{}).
 		Owns(&corev1.Secret{}).
+		Owns(&corev1.ConfigMap{}).
+		// Owner references remain authoritative for ordinary reconciliation.
+		// These additional label maps surface the exceptional ownerless child
+		// after a manager restart; workqueue de-duplication handles the small
+		// event overlap if ownership is repaired concurrently.
+		Watches(
+			&sandboxv1beta1.Sandbox{},
+			handler.EnqueueRequestsFromMapFunc(runForLabeledResource),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isOwnerlessManagedRunResource)),
+		).
+		Watches(
+			&corev1.Secret{},
+			handler.EnqueueRequestsFromMapFunc(runForLabeledResource),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isOwnerlessManagedRunResource)),
+		).
+		Watches(
+			&corev1.ConfigMap{},
+			handler.EnqueueRequestsFromMapFunc(runForLabeledResource),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isOwnerlessManagedRunResource)),
+		).
 		Watches(
 			&konveyoriov1alpha1.Agent{},
 			handler.EnqueueRequestsFromMapFunc(r.findRunsForAgent),
@@ -1183,7 +2011,7 @@ func (r *AgentRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		// is restricted to labeled pods (see SandboxPodCacheOptions).
 		Watches(
 			&corev1.Pod{},
-			handler.EnqueueRequestsFromMapFunc(runForSandboxPod),
+			handler.EnqueueRequestsFromMapFunc(runForLabeledResource),
 			builder.WithPredicates(predicate.NewPredicateFuncs(isSandboxPod)),
 		).
 		Named("agentrun").
@@ -1196,8 +2024,10 @@ func isSandboxPod(obj client.Object) bool {
 	return ok
 }
 
-// runForSandboxPod maps a sandbox pod to the AgentRun it belongs to.
-func runForSandboxPod(_ context.Context, obj client.Object) []reconcile.Request {
+// runForLabeledResource maps a controller-managed child or sandbox pod to the
+// AgentRun named by its identifying label. Unlike an owner-only map, this also
+// works when an owner reference is missing and the child needs to be swept.
+func runForLabeledResource(_ context.Context, obj client.Object) []reconcile.Request {
 	name, ok := obj.GetLabels()[labelAgentRun]
 	if !ok {
 		return nil
@@ -1244,8 +2074,7 @@ func (r *AgentRunReconciler) findRunsForAgent(
 	var requests []reconcile.Request
 	for _, run := range runList.Items {
 		// Only re-reconcile non-terminal runs.
-		if run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseSucceeded ||
-			run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseFailed {
+		if isTerminalPhase(run.Status.Phase) {
 			continue
 		}
 		requests = append(requests, reconcile.Request{

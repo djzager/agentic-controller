@@ -9,6 +9,7 @@ func fullLayers() Layers {
 	return Layers{
 		AgentPrompt:   "AGENT PROMPT",
 		WorkflowGuide: "WORKFLOW GUIDE",
+		Parameters:    "PARAMETERS BODY",
 		StageTask:     "STAGE TASK",
 	}
 }
@@ -21,7 +22,7 @@ func TestBuildPutsStagingRulesFirst(t *testing.T) {
 	}
 
 	rules := strings.Index(got, "Working Environment")
-	for _, later := range []string{"AGENT PROMPT", "WORKFLOW GUIDE", "STAGE TASK"} {
+	for _, later := range []string{"AGENT PROMPT", "WORKFLOW GUIDE", "PARAMETERS BODY", "STAGE TASK"} {
 		if strings.Index(got, later) < rules {
 			t.Errorf("%q appears before the staging rules; rules must come first", later)
 		}
@@ -31,7 +32,7 @@ func TestBuildPutsStagingRulesFirst(t *testing.T) {
 func TestBuildOrdersLayersLeastToMostSpecific(t *testing.T) {
 	got := Build(fullLayers())
 
-	order := []string{"AGENT PROMPT", "WORKFLOW GUIDE", "STAGE TASK"}
+	order := []string{"AGENT PROMPT", "WORKFLOW GUIDE", "PARAMETERS BODY", "STAGE TASK"}
 	for i := 1; i < len(order); i++ {
 		if strings.Index(got, order[i]) < strings.Index(got, order[i-1]) {
 			t.Errorf("%q should come after %q", order[i], order[i-1])
@@ -42,13 +43,21 @@ func TestBuildOrdersLayersLeastToMostSpecific(t *testing.T) {
 func TestBuildOmitsEmptyLayers(t *testing.T) {
 	got := Build(Layers{})
 
-	for _, header := range []string{"## Workflow Guide", "## Stage Task"} {
+	for _, header := range []string{"## Workflow Guide", "## Parameters", "## Stage Task"} {
 		if strings.Contains(got, header) {
 			t.Errorf("empty layer produced %q header", header)
 		}
 	}
 	if !strings.Contains(got, "## Working Guidelines") {
 		t.Error("working guidelines should always be included")
+	}
+}
+
+func TestBuildIncludesParametersSection(t *testing.T) {
+	got := Build(Layers{Parameters: "### Agent\n- foo: bar"})
+
+	if !strings.Contains(got, "## Parameters\n\n### Agent\n- foo: bar") {
+		t.Errorf("parameters section missing or malformed:\n%s", got)
 	}
 }
 
@@ -138,5 +147,20 @@ func TestBuildOmitsTheRulesSectionWhenThereAreNone(t *testing.T) {
 	got := Build(Layers{AgentPrompt: "agent", StageTask: "task"})
 	if strings.Contains(got, "## Rules") {
 		t.Errorf("empty rules section rendered:\n%s", got)
+	}
+}
+
+func TestAskUserGuideline(t *testing.T) {
+	with := Build(Layers{AgentPrompt: "p", StageTask: "t", AskUser: true})
+	without := Build(Layers{AgentPrompt: "p", StageTask: "t"})
+	if !strings.Contains(with, "`ask_user`") || !strings.Contains(with, "Do not ask questions in prose") {
+		t.Fatalf("ask_user guideline missing:\n%s", with)
+	}
+	if strings.Contains(without, "ask_user") {
+		t.Fatalf("ask_user guideline must only appear when the tool is mounted:\n%s", without)
+	}
+	// It belongs to the harness's working guidelines, ahead of the stage task.
+	if strings.Index(with, "ask_user") > strings.Index(with, "## Stage Task") {
+		t.Fatalf("guideline should precede the stage task:\n%s", with)
 	}
 }

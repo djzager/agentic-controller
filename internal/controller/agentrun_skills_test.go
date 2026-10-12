@@ -647,7 +647,11 @@ func TestSkillLoaderUsesTheControllerImageNotTheAgents(t *testing.T) {
 	r.SkillLoaderImage = testLoaderImage
 	ctx := context.Background()
 
-	if _, err := r.createSandbox(ctx, run, agent); err != nil {
+	params, scopes, err := buildParams(run, agent)
+	if err != nil {
+		t.Fatalf("build params: %v", err)
+	}
+	if _, err := r.createSandbox(ctx, run, agent, params, scopes); err != nil {
 		t.Fatalf("create sandbox: %v", err)
 	}
 	var sandbox sandboxv1beta1.Sandbox

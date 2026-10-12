@@ -2,10 +2,13 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/konveyor/migration-harness/internal/params"
 )
 
 const (
@@ -13,6 +16,11 @@ const (
 
 	// MaxHITLTimeoutSeconds caps HARNESS_HITL_TIMEOUT_SECONDS (10 min).
 	MaxHITLTimeoutSeconds = 600
+
+	// Default git commit identity used when the Agent/AgentRun does not
+	// configure one. Preserves the historical hardcoded author.
+	DefaultGitAuthorName  = "migration-agent"
+	DefaultGitAuthorEmail = "migration-agent@konveyor.io"
 )
 
 type Config struct {
@@ -29,6 +37,13 @@ type Config struct {
 	ACPSecretKey string
 
 	TargetBranch string
+
+	// GitAuthorName / GitAuthorEmail are the git commit identity the
+	// harness applies before the agent commits. Sourced from the
+	// Agent/AgentRun gitConfig (via the controller) and defaulted to
+	// DefaultGitAuthor* when unset.
+	GitAuthorName  string
+	GitAuthorEmail string
 
 	// Workflow stage metadata, injected by the controller for
 	// AgentWorkflowRun stages. Both empty for standalone AgentRuns.
@@ -47,11 +62,47 @@ type Config struct {
 	// the run session are relayed onto the run connection (default on;
 	// HARNESS_HITL_STEER=off makes the run stream watch-only).
 	HITLSteer bool
+	// HITLAsk: the agent gets an ask_user tool (the harness's own stdio
+	// MCP server) whose questions reach attached viewers as
+	// elicitation/create asks and block the turn until answered; with
+	// nobody watching they fail closed (cancelled, never answered for the
+	// human). Default OFF: that failure mode is only acceptable to a run
+	// somebody chose to watch, so the tool is opt-in — params.json
+	// execution.askUser (AgentRun/stage spec.execution.askUser), or
+	// HARNESS_HITL_ASK=on for a harness run outside the controller.
+	// HARNESS_HITL_ASK=off wins over both.
+	HITLAsk bool
+
+	// GitWriteCheck: before the stage runs, the harness proves the
+	// resolved credential can actually push to the application's source
+	// repository and fails the run early when it cannot, instead of
+	// spending every turn and discovering it at the final push (#247).
+	// Default on; HARNESS_GIT_WRITE_CHECK=off is for setups that
+	// deliberately run against a repository they never push to.
+	GitWriteCheck bool
 
 	// Prompt context layers, composed by internal/prompt.
 	AgentPrompt       string
 	WorkflowGuide     string
 	StageInstructions string
+
+	// Params is the parsed /run/konveyor/params.json (ADR 0009): workflow
+	// and agent parameter values, plus resolved execution controls. Its
+	// MaxTurns, when present, overrides the default above.
+	Params params.File
+
+	// CostLimit is params.ReserveFraction of the parsed
+	// execution.maxCost, in USD; 0 when maxCost is unset. SendPrompt
+	// cancels the primary prompt when cumulative usage_update cost
+	// reaches this threshold (ADR 0011).
+	CostLimit float64
+	// MaxCost is the unreserved execution.maxCost ceiling, in USD; 0
+	// when unset. ACP cost is cumulative for the whole session, so the
+	// handoff prompt is allowed to spend up to this full budget rather
+	// than CostLimit's reserved fraction — otherwise cumulative spend
+	// already sits at ~85% of MaxCost when the primary prompt stops,
+	// leaving the handoff no room to run (ADR 0011).
+	MaxCost float64
 }
 
 // envWithFallback reads primary first, falling back to fallback.
@@ -63,6 +114,21 @@ func envWithFallback(primary, fallback string) string {
 		return v
 	}
 	return os.Getenv(fallback)
+}
+
+// gitAuthorFromEnv reads the commit identity as one indivisible pair: both
+// KONVEYOR_GIT_AUTHOR_NAME and KONVEYOR_GIT_AUTHOR_EMAIL must be present to
+// take effect, otherwise the historical default identity is used for both.
+// Defaulting the two independently would let a half-set environment (e.g. a
+// single user-injected variable) mix a supplied name with the default email,
+// producing a hybrid author the CRD validation never sanctioned.
+func gitAuthorFromEnv() (name, email string) {
+	name = os.Getenv("KONVEYOR_GIT_AUTHOR_NAME")
+	email = os.Getenv("KONVEYOR_GIT_AUTHOR_EMAIL")
+	if name == "" || email == "" {
+		return DefaultGitAuthorName, DefaultGitAuthorEmail
+	}
+	return name, email
 }
 
 func LoadFromEnv() (*Config, error) {
@@ -81,6 +147,8 @@ func LoadFromEnv() (*Config, error) {
 		}
 	}
 
+	gitAuthorName, gitAuthorEmail := gitAuthorFromEnv()
+
 	cfg := &Config{
 		Model:        model,
 		Provider:     envWithFallback("KONVEYOR_LLM_PROVIDER", "KONVEYOR_MODEL_PRIMARY_PROVIDER"),
@@ -94,6 +162,9 @@ func LoadFromEnv() (*Config, error) {
 		ACPSecretKey: required["KONVEYOR_ACP_SECRET_KEY"],
 		TargetBranch: required["TARGET_BRANCH"],
 
+		GitAuthorName:  gitAuthorName,
+		GitAuthorEmail: gitAuthorEmail,
+
 		WorkflowStage:      os.Getenv("KONVEYOR_WORKFLOW_STAGE"),
 		WorkflowStageCount: os.Getenv("KONVEYOR_WORKFLOW_STAGE_COUNT"),
 
@@ -102,14 +173,38 @@ func LoadFromEnv() (*Config, error) {
 		StageInstructions: os.Getenv("KONVEYOR_INSTRUCTIONS"),
 	}
 
-	if n, err := strconv.Atoi(os.Getenv("KONVEYOR_PARAM_MAX_TURNS")); err == nil && n > 0 {
+	paramsFile, err := params.Load(paramsFilePath())
+	if err != nil {
+		return nil, fmt.Errorf("load params: %w", err)
+	}
+	cfg.Params = paramsFile
+	if n, ok := paramsFile.MaxTurns(); ok {
 		cfg.MaxTurns = n
+	}
+
+	if paramsFile.Execution.MaxCost != "" {
+		parsed, err := strconv.ParseFloat(paramsFile.Execution.MaxCost, 64)
+		if err != nil {
+			return nil, fmt.Errorf("execution.maxCost %q is not numeric: %w", paramsFile.Execution.MaxCost, err)
+		}
+		if math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed < 0 {
+			return nil, fmt.Errorf("execution.maxCost %q must be a finite non-negative number", paramsFile.Execution.MaxCost)
+		}
+		if parsed > 0 {
+			cfg.MaxCost = parsed
+			cfg.CostLimit = parsed * params.ReserveFraction
+		}
 	}
 
 	// Default-ON kill switches: the one E2E path must exercise the tee
 	// (and steering), so only an explicit opt-out disables them.
 	cfg.ACPTee = !envSwitchedOff("HARNESS_ACP_TEE")
 	cfg.HITLSteer = !envSwitchedOff("HARNESS_HITL_STEER")
+	// ask_user is the exception: it is the one HITL feature that can FAIL
+	// a run (an unanswered question, ADR 0017), so it is opt-in.
+	cfg.HITLAsk = (cfg.Params.Execution.AskUser || envSwitchedOn("HARNESS_HITL_ASK")) &&
+		!envSwitchedOff("HARNESS_HITL_ASK")
+	cfg.GitWriteCheck = !envSwitchedOff("HARNESS_GIT_WRITE_CHECK")
 	if n, err := strconv.Atoi(os.Getenv("HARNESS_HITL_TIMEOUT_SECONDS")); err == nil && n > 0 {
 		// Ceiling: a single ask parking the run for hours isn't HITL,
 		// it's abandonment — the pod deadline should not be spent inside
@@ -131,6 +226,24 @@ func envSwitchedOff(name string) bool {
 		return true
 	}
 	return false
+}
+
+func envSwitchedOn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "on", "true", "1", "enabled":
+		return true
+	}
+	return false
+}
+
+// paramsFilePath returns the path to the controller-written params.json
+// (ADR 0009). HARNESS_PARAMS_FILE overrides the contract path, for tests
+// and for running the harness outside a Sandbox pod (see hack/harness-*).
+func paramsFilePath() string {
+	if v := os.Getenv("HARNESS_PARAMS_FILE"); v != "" {
+		return v
+	}
+	return params.Path
 }
 
 // workflowGuideFromEnv reads the workflow guide the controller injects.

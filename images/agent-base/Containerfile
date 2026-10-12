@@ -1,11 +1,68 @@
-# agent-base: Foundation image with goose CLI, git, Python, graphify,
-# and the migration harness binary. All language images extend this.
+# agent-base: Foundation image with goose CLI, git, and the migration
+# harness binary. All language images extend this.
 #
 # Build context must be the repository root:
 #   podman build -t agent-base -f images/agent-base/Containerfile .
+#
+# Compiling goose takes ~35 minutes, which is nearly all of any build of
+# this image. The compile is therefore reachable on its own, as the
+# goose-dist target, and the stage that consumes it is an overridable ARG,
+# so CI can build the binary once and hand it back in:
+#
+#   podman build --target goose-dist -t goose:v1.45.0 -f images/agent-base/Containerfile .
+#   podman build --build-arg GOOSE_IMAGE=goose:v1.45.0 -f images/agent-base/Containerfile .
+#
+# With GOOSE_IMAGE set, the goose-builder and goose-dist stages are
+# unreferenced and the builder skips them. Left unset it defaults to
+# goose-dist, so a plain build still compiles goose from source and no
+# caller outside CI has to know any of this. Everything the binary depends
+# on lives between this ARG and the goose stage below, and that region is
+# what .github/actions/goose-image hashes for its cache key -- keep it that
+# way, or a stale binary survives a real change.
+ARG GOOSE_IMAGE=goose-dist
+
+# --- Goose build stage ---
+FROM golang:1.26 AS goose-builder
+
+# Goose CLI build deps
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && apt-get update && apt-get install -y \
+        build-essential \
+        git \
+        cmake \
+        pkg-config \
+        libssl-dev \
+        libclang-dev \
+        clang \
+        libdbus-1-dev \
+        libxcb1-dev \
+        perl \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Build goose from source (BUILDING_LINUX.md)
+ARG GOOSE_VERSION=v1.45.0
+WORKDIR /src/goose
+RUN git clone https://github.com/aaif-goose/goose.git . \
+    && git checkout ${GOOSE_VERSION} \
+    && cargo build --release -p goose-cli --bin goose \
+    && mv target/release/goose /usr/local/bin/goose
+
+# Just the binary, so what CI caches and reloads is ~100MB rather than the
+# whole Rust toolchain the compile needed.
+FROM scratch AS goose-dist
+COPY --from=goose-builder /usr/local/bin/goose /usr/local/bin/goose
+
+FROM ${GOOSE_IMAGE} AS goose
 
 # --- Build stage ---
-FROM golang:1.26 AS builder
+# Red Hat go-toolset (not upstream golang) is required for FIPS: built with
+# CGO_ENABLED=1 + GOEXPERIMENT=strictfipsruntime, the Go crypto routes through
+# the system OpenSSL (a FIPS-validated module) instead of Go's built-in crypto.
+FROM registry.access.redhat.com/ubi9/go-toolset:1.26 AS builder
+# go-toolset defaults to UID 1001; the build writes under /src.
+USER 0
 
 # The harness replaces github.com/konveyor/agentic-controller/api with ../api,
 # so that module has to be in the image at the path the replace names, laid out
@@ -18,41 +75,20 @@ RUN go mod download
 COPY api/ /src/api/
 COPY harness/cmd/ cmd/
 COPY harness/internal/ internal/
-RUN CGO_ENABLED=0 go build -o /migration-harness ./cmd/migration-harness/
+RUN CGO_ENABLED=1 GOEXPERIMENT=strictfipsruntime go build -tags strictfipsruntime -o /migration-harness ./cmd/migration-harness/
 
 # --- Runtime stage ---
 FROM registry.access.redhat.com/ubi10/ubi:latest
 
 RUN dnf install -y \
-    curl \
     git \
     ca-certificates \
     bzip2 \
     tar \
-    python3 \
-    python3-pip \
-    python3-devel \
-    gcc \
-    gcc-c++ \
-    libffi-devel \
-    pkg-config \
-    && python3 -m pip install --no-cache-dir graphifyy==0.7.17 \
-    && dnf remove -y gcc gcc-c++ python3-devel libffi-devel pkg-config \
     && dnf clean all
 
-ENV PYTHONUNBUFFERED=1
-
-# Install Goose (Block's LLM orchestrator)
-ARG GOOSE_VERSION=v1.45.0
-RUN ARCH=$(uname -m) \
-    && if [ "$ARCH" = "x86_64" ]; then GOOSE_ARCH="x86_64-unknown-linux-gnu"; \
-       elif [ "$ARCH" = "aarch64" ]; then GOOSE_ARCH="aarch64-unknown-linux-gnu"; \
-       else echo "Unsupported architecture: $ARCH" && exit 1; fi \
-    && curl -fsSL "https://github.com/block/goose/releases/download/${GOOSE_VERSION}/goose-${GOOSE_ARCH}.tar.bz2" -o /tmp/goose.tar.bz2 \
-    && tar -xjf /tmp/goose.tar.bz2 -C /tmp \
-    && mv /tmp/goose /usr/local/bin/goose \
-    && chmod +x /usr/local/bin/goose \
-    && rm -f /tmp/goose.tar.bz2
+# Copy goose binary from the goose stage
+COPY --from=goose /usr/local/bin/goose /usr/local/bin/goose
 
 ENV PATH="/opt/migration-harness/bin:${PATH}"
 ENV HARNESS_WORK_DIR=/workspace/repo

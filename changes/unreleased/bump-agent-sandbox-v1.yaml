@@ -1,0 +1,13 @@
+kind: enhancement
+
+description: >
+  Bump the Agent Sandbox dependency from v0.5.0 to v1.0.0. The Go API
+  module, the e2e kind install tag (AGENT_SANDBOX_TAG), and the docs now
+  target v1.0.0. The controller still uses only the v1beta1 API, but
+  v1.0.0 restructured its SandboxSpec (PodTemplate and Service moved into
+  an embedded SandboxBlueprint), so the reconciler was updated to build
+  the Sandbox through the new shape. The serialized CR is unchanged.
+  Operators upgrading an existing Agent Sandbox install in place must
+  note that v1.0.0 removes the legacy v1alpha1 API and its conversion
+  webhooks: upgrade to v0.5.2+ and run the stored-version migration
+  before moving to v1.0.0. Fresh installs are unaffected.

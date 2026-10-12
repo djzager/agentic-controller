@@ -47,14 +47,21 @@ field names and interaction model are designed to make this swap seamless.
 
 **Agent** — A capability definition declaring what is available for
 execution. References zero or more SkillCards and SkillCollections,
-one or more Gateways (each representing a provider/model combination
-available for runs), a container image (carrying the agent runtime
+zero or more Gateways (each a provider/model combination permitted for
+runs), a container image (carrying the agent runtime
 and language toolchains), a prompt (standing instructions for how the
 agent operates), and optionally a memory service for accumulating
 domain knowledge across executions. An Agent does not select a
-specific model — it declares what is available. Gateway selection
-happens at execution time in the AgentRun. The Agent controller
-validates that referenced Gateway CRs exist in the namespace and that
+specific model — it declares which gateways are permitted, and gateway
+selection happens at execution time in the AgentRun. The gateway list
+is a curation constraint, presence-gated: when the Agent lists
+gateways, a run's selection must be one of them (an architect can lock
+an Agent to a single gateway); when the list is empty the controller
+constrains nothing — the run must name a gateway itself, and what an
+empty list means to a user (not yet runnable, or free choice) is a
+Hub/UI concern, not the controller's. An Agent with no gateways is
+still a valid, Ready template. The Agent controller validates that any
+referenced Gateway CRs exist in the namespace and are Ready, and that
 SkillCards/SkillCollections are ready. When OpenShell is integrated,
 Gateway CRs will be replaced by OpenShell Gateway Services.
 Subagent delegation is a runtime concern — the agent runtime may
@@ -134,35 +141,25 @@ without adopting its packaging. See ADR 0015.
 agent workloads: Sandbox, SandboxTemplate, SandboxClaim, and
 SandboxWarmPool. Single-container design. Handles pod lifecycle,
 stable identity, network isolation, and warm pool pre-allocation.
-The controller does not interact with Agent Sandbox directly —
-OpenShell manages Sandbox CRs on our behalf.
+In the current implementation, the controller creates and watches Sandbox
+CRs directly. OpenShell is the deferred execution backend described by ADR
+0004; ADR 0016 records the accepted interim path.
 
 **OpenShell** — NVIDIA's secure-by-design runtime for autonomous
-agents. Runs on top of Agent Sandbox. The controller's primary
-execution interface — sandboxes are created through the OpenShell
-gateway API (via the Go SDK), not by creating Sandbox CRs directly.
-Each gateway is deployed via Helm as a Kubernetes Service, configured
-with one provider and one model. The gateway's supervisor is
-sideloaded into sandbox pods and provides: kernel-level isolation,
-declarative YAML-based security policies, credential injection via
-privacy proxy, and inference routing through `inference.local`. The
-agent inside the sandbox calls `inference.local` and never sees real
-LLM credentials. Providers, inference routes, and policies are
-configured on the gateway by the Platform Admin — they are not
-Kubernetes CRDs.
-_Avoid_: treating OpenShell as optional — it is a hard dependency
-for sandbox creation, replacing the direct Agent Sandbox dependency.
+agents. It is the intended future execution backend and runs on top of
+Agent Sandbox. It is not the current controller execution interface:
+today, the controller creates Sandbox CRs directly and uses the Gateway
+CRD as the pre-OpenShell provider/model configuration shim (ADR 0016).
+The intended OpenShell end state adds the gateway supervisor, policy
+enforcement, privacy-proxy credential injection, and `inference.local`.
+_Avoid_: describing that deferred end state as the current implementation.
 
 **OpenShell Gateway** — An instance of the OpenShell control plane
-deployed as a Kubernetes Service. Each gateway serves exactly one
-provider/model combination via `inference.local`. Platform Admin
-deploys multiple gateways (one per provider/model combo) into the
-shared namespace via Helm. All gateways must live in the same
-namespace as the controller and Hub — OpenShell's gateway, sandbox
-pods, TLS Secrets, and database are all namespace-scoped. An Agent
-references one or more gateways; an AgentRun selects one. The
-controller connects to the gateway using the OpenShell Go SDK and
-the gateway's client TLS credentials.
+deployed as a Kubernetes Service in the deferred OpenShell design. Each
+OpenShell Gateway serves one provider/model combination via
+`inference.local`. The current implementation instead uses the namespaced
+Gateway CRD, which the controller verifies with a Job and whose
+provider-specific credentials are injected into the Sandbox environment.
 _Avoid_: gateway (lowercase) when referring to Kubernetes Gateway API
 resources — always capitalize when referring to an OpenShell Gateway.
 
@@ -233,6 +230,17 @@ _Avoid_: `smart_approve` (goose-specific, functionally identical to
 `approve` for agents that write files and run commands);
 `interactive`/`non-interactive` (use `approve`/`auto` instead).
 
+**Ask User** — Opt-in permission for the agent to stop mid-turn and
+put a question to the viewers attached to the run (`ask_user` tool,
+ADR 0017). Set as `askUser` next to mode: on AgentRun for standalone
+runs, on individual AgentWorkflow stages for workflow runs. Defaults to
+off, independently of mode, because the gate is fail-closed: a question
+nobody answers within the HITL timeout fails the run, and only a run
+somebody chose to watch should be able to fail that way.
+_Avoid_: treating it as part of `approve` — approval gates the agent's
+tool calls, asking is the agent's own initiative, and a run may want
+either without the other.
+
 **Execution Limits** — Optional budget constraints on an agent
 execution: `maxTurns` (tool-call turns) and `maxCost` (cumulative
 USD). Set on Agent as defaults, overrideable per stage and per run.
@@ -258,6 +266,28 @@ _Avoid_: telling the LLM to read parameters from the environment or
 count its own iterations — if a program could do it deterministically,
 it belongs in the harness.
 
+## Packaging
+
+**Default** — Curated content the platform ships and installs on enable so
+it is usable and the UI is populated day one: the stage SkillCards and
+SkillCollection, the migration-stage Agents, and the java-ee-to-quarkus
+AgentWorkflow. Lives in `config/defaults/`. Defaults carry no namePrefix,
+no namespace, and no Gateway references — they resolve by plain name and
+install Ready without customer-specific credentials, so they are safe to
+apply on every cluster. The push-sync-to-operator workflow copies this
+directory verbatim into konveyor/tackle2-operator, which applies it into
+the namespace where agentic is enabled.
+_Avoid_: putting a Gateway or a gateway reference in a Default — Gateways
+need real endpoints and credentials, which makes them a Sample, not a
+Default.
+
+**Sample** — Illustrative CRs a user copies and edits; never
+auto-installed. Lives in `config/samples/`: the per-provider Gateways
+(each needs a real endpoint and Secret) and a standalone example Agent and
+AgentRun. Samples demonstrate the API and give a starting point.
+_Avoid_: treating Samples as shipped content — nothing in `config/samples/`
+is installed by `make deploy` or the operator.
+
 ## Relationships
 
 - A **SkillCard** is one skill, from one of three sources: OCI image
@@ -267,10 +297,13 @@ it belongs in the harness.
   naming a source directly.
 - An **Agent** references zero or more **SkillCards** and zero or more
   **SkillCollections**.
-- An **Agent** references one or more **Gateways** — declaring the
-  set of provider/model combinations available for runs.
-- An **AgentRun** references one **Agent** and selects one **Gateway**
-  from the Agent's available set.
+- An **Agent** references zero or more **Gateways** — declaring the
+  permitted set of provider/model combinations for runs. An empty set
+  is unconstrained at the controller level (see the Agent entry).
+- An **AgentRun** references one **Agent** and selects one **Gateway**.
+  When the Agent lists gateways the selection must be one of them;
+  when the Agent lists none the run may name any Gateway, which must
+  exist and be Ready.
 - An **AgentWorkflow** organizes work into stages. Each stage
   references an **Agent** and carries instructions.
 - An **AgentWorkflowRun** references one **AgentWorkflow** (or inlines it)

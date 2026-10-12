@@ -1,8 +1,25 @@
+---
+adr: "0007"
+title: "Harness as Thin Single-Stage Runner with SkillCard-Based Skills"
+description: "Defines the harness as a thin, single-stage runner responsible for git lifecycle, skill delivery, and agent runtime lifecycle."
+status: accepted
+date: "2026-07-21"
+last_updated: "2026-09-02"
+authors:
+  - "Savitha Raghunathan"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Accepted and implemented as the minimal entry point contract. The 2026-08-27 amendment records that it does not create .gitignore or grounding-data commits."
+---
+
 # ADR 0007: Harness as Thin Single-Stage Runner with SkillCard-Based Skills
 
-**Status:** Accepted
-**Date:** 2026-07-21
-**Authors:** Savitha Raghunathan
+**Update (2026-08-27):** The harness was slimmed to a minimal entry point — it no longer injects `.gitignore` entries for build artifacts (§3, "Thin single-stage runner" step 3) or authors the grounding-data commit (Alternatives, "Harness commits instead of agent"). See `docs/entry-point.md` for the current contract.
+
+**Update (2026-09-02):** The current plan skill does not run Graphify, and the
+base image no longer installs `graphifyy`. The stage and image descriptions
+below are retained as historical context where applicable; current planning
+uses repository files and optional Hub analysis results.
 
 ## Context
 
@@ -91,7 +108,7 @@ Three stage skills encode what was previously spread across Go packages:
 
 | Skill | Replaces | Purpose |
 |-------|----------|---------|
-| `plan` | `detect/`, `plan/`, `recipes/plan.yaml` | Run graphify, analyze project, produce PLAN.md |
+| `plan` | `detect/`, `plan/`, `recipes/plan.yaml` | Analyze the project and produce PLAN.md |
 | `execute` | `execute/`, `recipes/execute.yaml` | Read PLAN.md, apply transformations file by file |
 | `verify` | `verify/`, `fixloop/`, `recipes/verify.yaml` | Build, fix errors iteratively, report result |
 
@@ -106,7 +123,8 @@ image via `COPY skills/plan/ /opt/skills/plan/`. We chose instead to
 keep stage images skill-free and mount skills at runtime via SkillCards.
 
 This means:
-- Stage images contain only toolchain (graphify, JDK, Maven)
+- Stage images contain only the runtime and language toolchain (JDK, Maven,
+  or another language-specific toolchain)
 - Skills are versioned and released independently of images
 - The same stage image works with different skill combinations
 - The harness discovers all mounted skills via glob, not exactly one
@@ -117,7 +135,7 @@ One base image, one image per language. All stages for a language
 share the same image:
 
 ```
-agent-base (UBI + goose + git + graphify + harness binary)
+agent-base (UBI + goose + git + harness binary)
 ├── agent-java (+ JDK 21, Maven)
 ├── agent-csharp (+ .NET SDK)
 ├── agent-go (+ Go toolchain)
@@ -136,7 +154,7 @@ instructions; the watcher pushes those commits to the remote using
 credentials the agent cannot access.
 
 The watcher excludes irrelevant directories (`.goose/`, `__pycache__/`,
-`graphify-out/`, `node_modules/`) to avoid triggering on noise.
+`node_modules/`) to avoid triggering on noise.
 
 A final push after goose exits catches anything the watcher missed.
 
@@ -291,5 +309,3 @@ reconciler that watches pod exit codes.
   skill OCI images locally, loads them into Kind, and applies
   SkillCard + Agent + AgentWorkflow + AgentWorkflowRun CRs for
   end-to-end testing.
-
-

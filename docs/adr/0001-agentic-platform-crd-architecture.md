@@ -1,9 +1,33 @@
+---
+adr: "0001"
+title: "Agentic Platform CRD Architecture"
+description: "Defines the platform's CRDs and the boundaries between the controller, Hub, Agent Sandbox, and harness."
+status: accepted
+date: "2026-06-01"
+last_updated: "2026-09-02"
+authors:
+  - "David Zager"
+  - "Dylan Murray"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Core CRD, workflow, git-persistence, and Agent/AgentRun decisions remain useful. The CRD list, Gateway name, params delivery, skill delivery, Hub API, and commit-authorship details are amended in the ADR or superseded by ADRs 0006, 0007, 0009, 0015, and 0016."
+---
+
 # ADR 0001: Agentic Platform CRD Architecture
 
-**Status:** Accepted
-**Date:** 2026-06-01
-**Updated:** 2026-06-29
-**Authors:** David Zager, Dylan Murray
+**Update (2026-08-31):** Reconciled with the current implementation. The
+seven resources are now SkillCard, SkillCollection, Agent, AgentRun,
+AgentWorkflow, AgentWorkflowRun, and Gateway; the former LLMProvider name is
+historical. Later decisions supersede the original skill packaging and
+loading details (ADR 0014/0015), Hub access pattern (ADR 0006), parameter
+carrier (ADR 0009), and commit-authorship details (ADR 0007). The controller
+still creates Agent Sandbox resources directly; OpenShell is deferred by ADR
+0016.
+
+**Update (2026-09-02):** The current base image does not include Graphify or
+another code-graph generator. The earlier image description's Python runtime
+for Graphify was an unimplemented design remnant and has been removed from the
+current image contract.
 
 ## Context
 
@@ -327,7 +351,7 @@ Three layers:
 - Harness entrypoint (Go binary)
 - Konveyor tools (`fetch-analysis`, `run-analysis`, `skillctl`)
 - Core skills baked into `/opt/skills/`
-- git, ssh, Python 3.12 (for graphify), basics
+- git and basic archive/CA tooling
 - No agent runtime — runtime is added in the next layer
 
 **Layer 1.5 — Runtime images** (e.g., `agent-base-goose`,

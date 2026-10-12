@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/konveyor/migration-harness/internal/logging"
+	"github.com/konveyor/migration-harness/internal/params"
 )
 
 // ServeProcess manages a goose serve process.
@@ -66,6 +67,14 @@ type ServeConfig struct {
 	Model    string
 	APIKey   string
 	Endpoint string
+	// Mode sets GOOSE_MODE (auto/approve); empty defaults to "auto"
+	// (ADR 0011).
+	Mode string
+	// MaxTurns is the configured (not yet reserved) turn budget.
+	// StartServe reserves params.ReserveFraction of it for the
+	// harness's wind-down handoff prompt when setting GOOSE_MAX_TURNS
+	// (ADR 0011) — 0 means unset (runtime default applies).
+	MaxTurns int
 }
 
 func StartServe(ctx context.Context, cfg ServeConfig) (*ServeProcess, error) {
@@ -91,6 +100,7 @@ func StartServe(ctx context.Context, cfg ServeConfig) (*ServeProcess, error) {
 		"--with-builtin", "developer",
 	)
 	env, tempDirs := providerEnv(provider, model, apiKey, endpoint)
+	env = append(env, executionEnv(cfg.Mode, cfg.MaxTurns)...)
 	if secretKey != "" {
 		env = append(env, "GOOSE_SERVER__SECRET_KEY="+secretKey)
 	}
@@ -212,6 +222,8 @@ func providerEnv(provider, model, apiKey, endpoint string) (env []string, tempDi
 			env = append(env, "OPENAI_API_KEY="+apiKey)
 		case "google":
 			env = append(env, "GOOGLE_API_KEY="+apiKey)
+		case "xai":
+			env = append(env, "XAI_API_KEY="+apiKey)
 		case "gcp_vertex_ai":
 			// uses ADC credentials, not an API key
 		case "aws_bedrock":
@@ -241,6 +253,10 @@ func providerEnv(provider, model, apiKey, endpoint string) (env []string, tempDi
 			env = append(env, "ANTHROPIC_HOST="+endpoint)
 		case "openai":
 			env = append(env, "OPENAI_HOST="+endpoint)
+		case "xai":
+			// goose defaults XAI_HOST to https://api.x.ai/v1; the Gateway
+			// endpoint (https://api.x.ai) is used only for the controller's
+			// /v1/models verification probe, so it is not forwarded here.
 		case "gcp_vertex_ai":
 			// endpoint configured via ADC project/region, not env var
 		case "aws_bedrock":
@@ -251,6 +267,23 @@ func providerEnv(provider, model, apiKey, endpoint string) (env []string, tempDi
 	}
 
 	return env, tempDirs
+}
+
+// executionEnv translates execution controls into the env vars goose
+// expects (ADR 0011). GOOSE_MODE is always set (default "auto" when
+// mode is empty, so behavior is explicit even without a params.json
+// execution.mode value). GOOSE_MAX_TURNS is set only when maxTurns > 0,
+// reserving params.ReserveFraction of it for the harness's wind-down
+// handoff prompt — the runtime is the sole turn counter now (ADR 0011).
+func executionEnv(mode string, maxTurns int) []string {
+	if mode == "" {
+		mode = "auto"
+	}
+	env := []string{"GOOSE_MODE=" + mode}
+	if native := params.NativeTurnLimit(maxTurns); native > 0 {
+		env = append(env, fmt.Sprintf("GOOSE_MAX_TURNS=%d", native))
+	}
+	return env
 }
 
 func filterEnvKey(env []string, key string) []string {

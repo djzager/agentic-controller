@@ -41,15 +41,23 @@ import (
 )
 
 const (
-	testNamespace     = "default"
-	testAgentImage    = "quay.io/konveyor/agent-base:latest"
-	testEndpoint      = "https://api.example.com"
-	testSecretKey     = "api-key"
-	testLLMModelName  = "test-model"
-	testGatewayName   = "some-gateway"
-	testProviderType  = "test-provider"
-	testRepoURL       = "https://github.com/test/repo.git"
-	testDefaultBranch = "main"
+	testNamespace        = "default"
+	testAgentImage       = "quay.io/konveyor/agent-base:latest"
+	testEndpoint         = "https://api.example.com"
+	testSecretKey        = "api-key"
+	testLLMModelName     = "test-model"
+	testGatewayName      = "some-gateway"
+	testProviderType     = "test-provider"
+	testRepoURL          = "https://github.com/test/repo.git"
+	testDefaultBranch    = "main"
+	testNonexistentAgent = "nonexistent-agent"
+	testSkillImage       = "quay.io/konveyor/skills:test-skill"
+	testAWSRegion        = "us-east-1"
+	stageAName           = "stage-a"
+	stageBName           = "stage-b"
+	// testProviderBedrock is spelled as a user writes it (hyphenated), so
+	// tests exercise normalizeProvider rather than the normalized form.
+	testProviderBedrock = "aws-bedrock"
 )
 
 var (
@@ -120,6 +128,9 @@ var _ = BeforeSuite(func() {
 	err = (&SkillCardReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Deterministic, network-free resolver keyed by ref so the Resolvable
+		// condition can be exercised in envtest without reaching a registry.
+		Resolver: fakeImageResolver{},
 	}).SetupWithManager(mgr)
 	Expect(err).NotTo(HaveOccurred())
 

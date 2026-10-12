@@ -173,7 +173,7 @@ var _ = Describe("CRD Validation", func() {
 					Namespace: testNamespace,
 				},
 				Spec: konveyoriov1alpha1.GatewaySpec{
-					Provider: "anthropic",
+					Provider: providerAnthropic,
 					Endpoint: "https://api.anthropic.com",
 					CredentialRef: konveyoriov1alpha1.GatewayCredentialRef{
 						SecretName: "anthropic-credentials",
@@ -205,16 +205,16 @@ var _ = Describe("CRD Validation", func() {
 					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
 						{Ref: testGateway},
 					},
-					Params: []konveyoriov1alpha1.AgentParam{
+					Params: []konveyoriov1alpha1.Param{
 						{
 							Name:        testParamName,
-							Type:        konveyoriov1alpha1.AgentParamTypeString,
+							Type:        konveyoriov1alpha1.ParamTypeString,
 							Description: "Git URL of the application source",
 							Required:    true,
 						},
 						{
 							Name:    "source_branch",
-							Type:    konveyoriov1alpha1.AgentParamTypeString,
+							Type:    konveyoriov1alpha1.ParamTypeString,
 							Default: testDefaultBranch,
 						},
 					},
@@ -235,7 +235,7 @@ var _ = Describe("CRD Validation", func() {
 					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
 						{Ref: testGatewayName},
 					},
-					Params: []konveyoriov1alpha1.AgentParam{
+					Params: []konveyoriov1alpha1.Param{
 						{
 							Name:    testParamTargetBranch,
 							Default: testDefaultBranch,
@@ -259,7 +259,7 @@ var _ = Describe("CRD Validation", func() {
 					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
 						{Ref: testGatewayName},
 					},
-					Params: []konveyoriov1alpha1.AgentParam{
+					Params: []konveyoriov1alpha1.Param{
 						{
 							Name:     testParamName,
 							Default:  "https://example.com",
@@ -273,7 +273,10 @@ var _ = Describe("CRD Validation", func() {
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
 
-		It("should reject an Agent with no gateways", func() {
+		It("should accept an Agent with no gateways", func() {
+			// gateways is a presence-gated curation constraint: an empty
+			// list is valid and means the controller enforces nothing, so a
+			// curated default Agent can ship without a customer's Gateway.
 			agent := &konveyoriov1alpha1.Agent{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "agent-no-gateways-test",
@@ -284,6 +287,91 @@ var _ = Describe("CRD Validation", func() {
 					Gateways: []konveyoriov1alpha1.AgentGatewayRef{},
 				},
 			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+		})
+
+		It("should accept an Agent that omits gateways entirely", func() {
+			agent := &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "agent-omit-gateways-test",
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testImageGoose,
+				},
+			}
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+		})
+
+		// agentWithGitConfig builds an otherwise-valid Agent carrying the
+		// given gitConfig, so the git-identity cases below isolate the
+		// GitConfig validation.
+		agentWithGitConfig := func(name string, gc *konveyoriov1alpha1.GitConfig) *konveyoriov1alpha1.Agent {
+			return &konveyoriov1alpha1.Agent{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      name,
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentSpec{
+					Image: testImageGoose,
+					Gateways: []konveyoriov1alpha1.AgentGatewayRef{
+						{Ref: testGatewayName},
+					},
+					GitConfig: gc,
+				},
+			}
+		}
+
+		It("should accept an Agent with a complete gitConfig", func() {
+			agent := agentWithGitConfig("agent-gitconfig-valid-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent, UserEmail: gitEmailAgent})
+			Expect(k8sClient.Create(ctx, agent)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, agent)).To(Succeed())
+		})
+
+		It("should reject an empty gitConfig", func() {
+			agent := agentWithGitConfig("agent-gitconfig-empty-test",
+				&konveyoriov1alpha1.GitConfig{})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a gitConfig with only userName set", func() {
+			agent := agentWithGitConfig("agent-gitconfig-name-only-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a gitConfig with only userEmail set", func() {
+			agent := agentWithGitConfig("agent-gitconfig-email-only-test",
+				&konveyoriov1alpha1.GitConfig{UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a userName containing ident metacharacters", func() {
+			agent := agentWithGitConfig("agent-gitconfig-bad-name-test",
+				&konveyoriov1alpha1.GitConfig{UserName: "Evil <a@b.com>", UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a userName containing a newline", func() {
+			agent := agentWithGitConfig("agent-gitconfig-newline-name-test",
+				&konveyoriov1alpha1.GitConfig{UserName: "Coolstore\nBot", UserEmail: gitEmailAgent})
+			err := k8sClient.Create(ctx, agent)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a malformed userEmail", func() {
+			agent := agentWithGitConfig("agent-gitconfig-bad-email-test",
+				&konveyoriov1alpha1.GitConfig{UserName: gitNameAgent, UserEmail: "not-an-email"})
 			err := k8sClient.Create(ctx, agent)
 			Expect(err).To(HaveOccurred())
 			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
@@ -301,7 +389,7 @@ var _ = Describe("CRD Validation", func() {
 				Spec: konveyoriov1alpha1.AgentRunSpec{
 					AgentRef: "java-migration-agent",
 					Gateway:  testGateway,
-					Params: []konveyoriov1alpha1.AgentRunParam{
+					Params: []konveyoriov1alpha1.ParamValue{
 						{Name: testParamName, Value: "https://github.com/acme/app.git"},
 					},
 					Instructions: "Migrate this application.",
@@ -326,11 +414,65 @@ var _ = Describe("CRD Validation", func() {
 					Namespace: testNamespace,
 				},
 				Spec: konveyoriov1alpha1.AgentRunSpec{
-					AgentRef: "some-agent",
+					AgentRef: testFileMountAgent,
 				},
 			}
 			Expect(k8sClient.Create(ctx, ar)).To(Succeed())
 			Expect(k8sClient.Delete(ctx, ar)).To(Succeed())
+		})
+
+		It("should accept an AgentRun with valid fileMounts", func() {
+			ar := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ar-filemounts-valid-test",
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: testFileMountAgent,
+					FileMounts: []konveyoriov1alpha1.FileMount{
+						{SecretName: testMountSecretName, MountPath: testMountSecretPath, SubPath: testMountKey},
+						{ConfigMapName: testMountCMName, MountPath: testMountCMPath},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ar)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, ar)).To(Succeed())
+		})
+
+		It("should reject a fileMount naming both a Secret and a ConfigMap", func() {
+			ar := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ar-filemounts-both-test",
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: testFileMountAgent,
+					FileMounts: []konveyoriov1alpha1.FileMount{
+						{SecretName: "s", ConfigMapName: "c", MountPath: testMountBadPath},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, ar)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
+		})
+
+		It("should reject a fileMount naming neither a Secret nor a ConfigMap", func() {
+			ar := &konveyoriov1alpha1.AgentRun{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "ar-filemounts-neither-test",
+					Namespace: testNamespace,
+				},
+				Spec: konveyoriov1alpha1.AgentRunSpec{
+					AgentRef: testFileMountAgent,
+					FileMounts: []konveyoriov1alpha1.FileMount{
+						{MountPath: testMountBadPath},
+					},
+				},
+			}
+			err := k8sClient.Create(ctx, ar)
+			Expect(err).To(HaveOccurred())
+			Expect(errors.IsInvalid(err)).To(BeTrue(), fmt.Sprintf("expected Invalid error, got: %v", err))
 		})
 
 		It("should reject an AgentRun with empty agentRef", func() {
@@ -476,7 +618,7 @@ var _ = Describe("CRD Validation", func() {
 				Spec: konveyoriov1alpha1.AgentWorkflowRunSpec{
 					WorkflowRef: "java-migration",
 					Gateway:     testGateway,
-					Params: []konveyoriov1alpha1.AgentRunParam{
+					Params: []konveyoriov1alpha1.ParamValue{
 						{Name: testParamName, Value: "https://github.com/acme/app.git"},
 					},
 					Env: []corev1.EnvVar{

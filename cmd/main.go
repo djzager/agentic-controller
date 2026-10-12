@@ -21,6 +21,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -65,6 +66,8 @@ func main() {
 	var probeAddr string
 	var secureMetrics bool
 	var enableHTTP2 bool
+	var agentRunTTL time.Duration
+	var agentRunStartupDeadline time.Duration
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
@@ -83,6 +86,18 @@ func main() {
 	flag.StringVar(&metricsCertKey, "metrics-cert-key", "tls.key", "The name of the metrics server key file.")
 	flag.BoolVar(&enableHTTP2, "enable-http2", false,
 		"If set, HTTP/2 will be enabled for the metrics and webhook servers")
+	flag.DurationVar(&agentRunTTL, "agentrun-ttl", 0,
+		"Default lifetime of a finished AgentRun or AgentWorkflowRun before it is "+
+			"garbage-collected (e.g. 24h). 0 disables the default, keeping runs "+
+			"until deleted. A run's own spec.ttlSecondsAfterFinished overrides this. "+
+			"Applies to already-finished runs too: enabling it reaps any run whose "+
+			"completion is already older than the TTL on the next reconcile.")
+	flag.DurationVar(&agentRunStartupDeadline, "agentrun-startup-deadline", 0,
+		"Default deadline for an AgentRun's pod to reach a running state before "+
+			"the run is failed with StartupDeadlineExceeded (e.g. 10m). 0 disables "+
+			"the default. Fatal pod errors (ImagePullBackOff, CrashLoopBackOff, "+
+			"InvalidImageName, CreateContainerConfigError) fail runs immediately "+
+			"regardless. A run's own spec.startupDeadlineSeconds overrides this.")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -201,6 +216,10 @@ func main() {
 	if err := (&controller.SkillCardReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
+		// Best-effort registry existence check behind the Resolvable condition,
+		// so a well-formed ref to a missing artifact is flagged at reconcile
+		// rather than surfacing only as ImagePullBackOff at run time.
+		Resolver: controller.NewRegistryImageResolver(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "SkillCard")
 		os.Exit(1)
@@ -229,11 +248,18 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "Agent")
 		os.Exit(1)
 	}
-	if err := (&controller.AgentRunReconciler{
+	agentRunReconciler := &controller.AgentRunReconciler{
 		Client:           mgr.GetClient(),
 		Scheme:           mgr.GetScheme(),
 		SkillLoaderImage: skillLoaderImage,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if agentRunTTL > 0 {
+		agentRunReconciler.DefaultTTLAfterFinished = &agentRunTTL
+	}
+	if agentRunStartupDeadline > 0 {
+		agentRunReconciler.DefaultStartupDeadline = &agentRunStartupDeadline
+	}
+	if err := agentRunReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "AgentRun")
 		os.Exit(1)
 	}
@@ -244,11 +270,15 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "AgentWorkflow")
 		os.Exit(1)
 	}
-	if err := (&controller.AgentWorkflowRunReconciler{
+	workflowRunReconciler := &controller.AgentWorkflowRunReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		Recorder: mgr.GetEventRecorder("agentworkflowrun-controller"),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if agentRunTTL > 0 {
+		workflowRunReconciler.DefaultTTLAfterFinished = &agentRunTTL
+	}
+	if err := workflowRunReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "AgentWorkflowRun")
 		os.Exit(1)
 	}

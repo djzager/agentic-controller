@@ -18,8 +18,10 @@ package controller
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"maps"
+	"time"
 
 	"strings"
 
@@ -31,9 +33,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	konveyoriov1alpha1 "github.com/konveyor/agentic-controller/api/v1alpha1"
@@ -43,6 +47,7 @@ const (
 	// workflowRunRefIndexField is the field index for looking up
 	// AgentWorkflowRuns by workflowRef.
 	workflowRunRefIndexField = ".spec.workflowRef"
+	workflowGuideEnvName     = "KONVEYOR_WORKFLOW_GUIDE"
 )
 
 // AgentWorkflowRunReconciler reconciles an AgentWorkflowRun object.
@@ -50,6 +55,19 @@ type AgentWorkflowRunReconciler struct {
 	client.Client
 	Scheme   *runtime.Scheme
 	Recorder events.EventRecorder
+
+	// DefaultTTLAfterFinished, when non-nil, is the fallback lifetime applied
+	// to a terminal AgentWorkflowRun whose spec does not set
+	// TTLSecondsAfterFinished. The controller deletes such a run this long
+	// after it finished — cascading to the child AgentRuns it owns. Nil
+	// disables the default. A run's own spec.ttlSecondsAfterFinished always
+	// overrides this. Wired from the --agentrun-ttl flag in main.
+	DefaultTTLAfterFinished *time.Duration
+
+	// apiReader confirms a cache miss before the orphan sweep deletes child
+	// AgentRuns. Parent and child informer events are not ordered across types.
+	// Set by SetupWithManager.
+	apiReader client.Reader
 }
 
 // +kubebuilder:rbac:groups=konveyor.io,resources=agentworkflowruns,verbs=get;list;watch;create;update;patch;delete
@@ -72,7 +90,18 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	var pbRun konveyoriov1alpha1.AgentWorkflowRun
 	if err := r.Get(ctx, req.NamespacedName, &pbRun); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		if !errors.IsNotFound(err) {
+			return ctrl.Result{}, err
+		}
+		if r.apiReader != nil {
+			var current konveyoriov1alpha1.AgentWorkflowRun
+			if err := r.apiReader.Get(ctx, req.NamespacedName, &current); err == nil {
+				return ctrl.Result{Requeue: true}, nil
+			} else if !errors.IsNotFound(err) {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{}, r.cleanupOrphanedWorkflowRunResources(ctx, req.NamespacedName)
 	}
 
 	logger.V(1).Info("Reconciling AgentWorkflowRun", "name", pbRun.Name)
@@ -80,10 +109,10 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	original := pbRun.DeepCopy()
 	pbRun.Status.ObservedGeneration = pbRun.Generation
 
-	// If the run is already terminal, nothing to do.
-	if pbRun.Status.Phase == konveyoriov1alpha1.AgentRunPhaseSucceeded ||
-		pbRun.Status.Phase == konveyoriov1alpha1.AgentRunPhaseFailed {
-		return ctrl.Result{}, nil
+	// A terminal run has no orchestration work left; the only remaining
+	// action is TTL-based garbage collection.
+	if isTerminalPhase(pbRun.Status.Phase) {
+		return r.reconcileTTL(ctx, &pbRun, original)
 	}
 
 	// Look up the referenced AgentWorkflow.
@@ -126,13 +155,22 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhasePending
 	}
 
-	// Initialize stage statuses if empty.
+	// Initialize the run from a snapshot of the workflow definition
+	// (#87). The controller executes from this snapshot, not the live
+	// workflow spec, so a mid-run edit to the workflow (stage agent,
+	// instructions, execution, guide, or params) cannot change stages
+	// that have already been planned.
 	if len(pbRun.Status.Stages) == 0 {
+		pbRun.Status.Guide = workflow.Spec.Guide
+		pbRun.Status.Params = workflow.Spec.Params
 		pbRun.Status.Stages = make([]konveyoriov1alpha1.AgentWorkflowRunStageStatus, len(workflow.Spec.Stages))
 		for i, stage := range workflow.Spec.Stages {
 			pbRun.Status.Stages[i] = konveyoriov1alpha1.AgentWorkflowRunStageStatus{
-				Name:  stage.Name,
-				Phase: konveyoriov1alpha1.AgentRunPhasePending,
+				Name:         stage.Name,
+				Phase:        konveyoriov1alpha1.AgentRunPhasePending,
+				AgentRef:     stage.AgentRef,
+				Instructions: stage.Instructions,
+				Execution:    stage.Execution,
 			}
 		}
 	}
@@ -158,29 +196,15 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return r.patchRunStatus(ctx, &pbRun, original)
 	}
 
-	// Look up the stage definition from the workflow by name
-	// (matching the snapshotted status entry).
+	// Read the stage definition from the snapshot captured at init
+	// (#87), not the live workflow — so a mid-run edit cannot change a
+	// planned stage. Reconstruct the stage from the snapshotted fields.
 	stageStatus := &pbRun.Status.Stages[stageIndex]
-	var stage *konveyoriov1alpha1.AgentWorkflowStage
-	for i := range workflow.Spec.Stages {
-		if workflow.Spec.Stages[i].Name == stageStatus.Name {
-			stage = &workflow.Spec.Stages[i]
-			break
-		}
-	}
-	if stage == nil {
-		// The workflow was modified and no longer has this stage.
-		pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
-		now := metav1.Now()
-		pbRun.Status.CompletionTime = &now
-		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
-			Type:               ConditionTypeReady,
-			Status:             metav1.ConditionFalse,
-			ObservedGeneration: pbRun.Generation,
-			Reason:             "StageNotFound",
-			Message:            fmt.Sprintf("Stage %q no longer exists in AgentWorkflow %q", stageStatus.Name, pbRun.Spec.WorkflowRef),
-		})
-		return r.patchRunStatus(ctx, &pbRun, original)
+	stage := &konveyoriov1alpha1.AgentWorkflowStage{
+		Name:         stageStatus.Name,
+		AgentRef:     stageStatus.AgentRef,
+		Instructions: stageStatus.Instructions,
+		Execution:    stageStatus.Execution,
 	}
 
 	pbRun.Status.CurrentStage = stage.Name
@@ -188,8 +212,28 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 
 	// If no AgentRun exists for this stage, create one.
 	if stageStatus.AgentRunName == "" {
-		agentRunName, err := r.createAgentRunForStage(ctx, &pbRun, &workflow, stage, stageIndex, len(pbRun.Status.Stages))
+		agentRunName, err := r.createAgentRunForStage(ctx, &pbRun, stage, stageIndex, len(pbRun.Status.Stages))
 		if err != nil {
+			// A permanent config error (bad workflow param, unresolved
+			// $(workflow.<name>) in the guide) can never clear on retry —
+			// fail the run terminally, matching the AgentRun's
+			// InvalidParams. Everything else is transient: requeue.
+			var cfgErr *configError
+			if stderrors.As(err, &cfgErr) {
+				stageStatus.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
+				now := metav1.Now()
+				pbRun.Status.CompletionTime = &now
+				meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
+					Type:               ConditionTypeReady,
+					Status:             metav1.ConditionFalse,
+					ObservedGeneration: pbRun.Generation,
+					Reason:             "InvalidParams",
+					Message:            fmt.Sprintf("Stage %q: %v", stage.Name, err),
+				})
+				return r.patchRunStatus(ctx, &pbRun, original)
+			}
+
 			logger.Error(err, "Failed to create AgentRun for stage",
 				"stage", stage.Name)
 			meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
@@ -238,11 +282,23 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		return ctrl.Result{}, err
 	}
 
-	// Mirror the AgentRun's phase onto the stage status.
-	stageStatus.Phase = agentRun.Status.Phase
+	// Mirror the AgentRun's phase onto the stage status for display. A newly
+	// created AgentRun can be observed before its own controller has initialized
+	// status.phase; preserve the stage's Pending value during that short window
+	// rather than writing an empty value that violates the CRD enum.
+	if agentRun.Status.Phase != "" {
+		stageStatus.Phase = agentRun.Status.Phase
+	}
 
-	switch agentRun.Status.Phase {
-	case konveyoriov1alpha1.AgentRunPhaseSucceeded:
+	// Sequence on the AgentRun's Succeeded condition, not phase (ADR 0018):
+	// True advances to the next stage, False (failure or limit reached)
+	// stops the workflow, Unknown/absent keeps waiting. This is the
+	// controller state machine reading Succeeded so phase can eventually
+	// be retired.
+	succeeded := meta.FindStatusCondition(agentRun.Status.Conditions,
+		konveyoriov1alpha1.AgentRunConditionSucceeded)
+	switch {
+	case succeeded != nil && succeeded.Status == metav1.ConditionTrue:
 		// Stage completed — the next reconcile will advance to the next stage.
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
@@ -253,22 +309,34 @@ func (r *AgentWorkflowRunReconciler) Reconcile(ctx context.Context, req ctrl.Req
 		})
 		return r.patchRunStatus(ctx, &pbRun, original)
 
-	case konveyoriov1alpha1.AgentRunPhaseFailed:
-		// Stage failed — fail the entire workflow run.
+	case succeeded != nil && succeeded.Status == metav1.ConditionFalse:
+		// Stage did not succeed (failure or limit reached) — fail the
+		// entire workflow run.
 		pbRun.Status.Phase = konveyoriov1alpha1.AgentRunPhaseFailed
 		now := metav1.Now()
 		pbRun.Status.CompletionTime = &now
+		// Surface the child AgentRun's full message, not just its Reason: the
+		// child is immutable and controller-managed, so its own status is a
+		// dead end for the user. The actionable guidance (e.g. "select one via
+		// spec.gateway") only reaches an editable resource here -- and because
+		// spec.gateway on the AgentWorkflowRun is what feeds the stage, that
+		// guidance reads correctly against this resource. Fall back to Reason
+		// when the child left no message.
+		detail := succeeded.Message
+		if detail == "" {
+			detail = succeeded.Reason
+		}
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
 			ObservedGeneration: pbRun.Generation,
 			Reason:             "StageFailed",
-			Message:            fmt.Sprintf("Stage %q failed", stage.Name),
+			Message:            fmt.Sprintf("Stage %q did not succeed: %s", stage.Name, detail),
 		})
 		return r.patchRunStatus(ctx, &pbRun, original)
 
 	default:
-		// Stage is still running (Pending or Running).
+		// Stage is still running (Succeeded=Unknown or not yet set).
 		meta.SetStatusCondition(&pbRun.Status.Conditions, metav1.Condition{
 			Type:               ConditionTypeReady,
 			Status:             metav1.ConditionFalse,
@@ -310,10 +378,20 @@ func stageAgentRunName(pbRunName, stageName string) string {
 //
 // Uses a deterministic name (<workflowrun>-<stage>) so that duplicate
 // creation on status-patch conflict is caught by AlreadyExists.
+// configError marks a permanent configuration error in a workflow run —
+// a bad workflow param value or an unresolved $(workflow.<name>) in the
+// guide. The declarations come from the frozen Status snapshot and the
+// supplied values from the immutable spec, so retrying cannot clear it;
+// the caller fails the run terminally (InvalidParams) rather than
+// requeuing forever, matching the AgentRun side.
+type configError struct{ err error }
+
+func (e *configError) Error() string { return e.err.Error() }
+func (e *configError) Unwrap() error { return e.err }
+
 func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 	ctx context.Context,
 	pbRun *konveyoriov1alpha1.AgentWorkflowRun,
-	workflow *konveyoriov1alpha1.AgentWorkflow,
 	stage *konveyoriov1alpha1.AgentWorkflowStage,
 	stageIndex int,
 	stageCount int,
@@ -333,16 +411,24 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 	for _, p := range agent.Spec.Params {
 		declared[p.Name] = true
 	}
+	// Workflow-declared params (snapshotted at init, #87) are legitimate
+	// even when a stage's Agent does not declare them — they feed the
+	// workflow section of params.json and $(workflow.<name>) in the guide.
+	workflowDeclared := make(map[string]bool, len(pbRun.Status.Params))
+	for _, p := range pbRun.Status.Params {
+		workflowDeclared[p.Name] = true
+	}
 
-	// Filter workflow-run params to only those this stage's Agent declares.
-	// Params not declared by the stage Agent are silently dropped — log
-	// and emit an event so typos are debuggable.
-	var stageParams []konveyoriov1alpha1.AgentRunParam
+	// Pass only the stage Agent's declared params through to its AgentRun.
+	// A param declared by neither the stage Agent nor the workflow is a
+	// typo — log and emit an event so it is debuggable; a workflow-only
+	// param (used in the guide) is not skipped, it is consumed below.
+	var stageParams []konveyoriov1alpha1.ParamValue
 	var skipped []string
 	for _, p := range pbRun.Spec.Params {
 		if declared[p.Name] {
 			stageParams = append(stageParams, p)
-		} else {
+		} else if !workflowDeclared[p.Name] {
 			skipped = append(skipped, p.Name)
 		}
 	}
@@ -366,10 +452,30 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 
 	// Controller-owned env vars — appended after user env so they
 	// cannot be spoofed.
-	if workflow.Spec.Guide != "" {
+	// Resolve workflow-level params once from the snapshot (#87): coerce
+	// for stamping onto the stage AgentRun (params.json workflow
+	// section) and keep the string form for substituting the guide
+	// (workflow scope only — the guide is ambient across stages and must
+	// not reference stage-agent params). ADR 0009/0018.
+	workflowRaw, workflowStrs, err := coerceWorkflowParams(
+		pbRun.Status.Params, suppliedValues(pbRun.Spec.Params))
+	if err != nil {
+		// Permanent: declarations are the frozen Status.Params snapshot and
+		// the supplied values are on the immutable spec, so retrying cannot
+		// clear it. Fail terminally, matching the AgentRun's InvalidParams.
+		return "", &configError{fmt.Errorf("resolving workflow params: %w", err)}
+	}
+
+	if pbRun.Status.Guide != "" {
+		guide, err := substitute(pbRun.Status.Guide, map[string]map[string]string{scopeWorkflow: workflowStrs})
+		if err != nil {
+			// Permanent: the guide is a frozen snapshot; an unresolved
+			// $(workflow.<name>) never clears on retry.
+			return "", &configError{fmt.Errorf("workflow guide: %w", err)}
+		}
 		env = append(env, corev1.EnvVar{
-			Name:  "KONVEYOR_WORKFLOW_GUIDE",
-			Value: workflow.Spec.Guide,
+			Name:  workflowGuideEnvName,
+			Value: guide,
 		})
 	}
 
@@ -411,6 +517,16 @@ func (r *AgentWorkflowRunReconciler) createAgentRunForStage(
 			Params:       stageParams,
 			Env:          env,
 			EnvFrom:      pbRun.Spec.EnvFrom,
+			FileMounts:   pbRun.Spec.FileMounts,
+			// Stamp the stage-resolved execution config (stage override,
+			// else Agent default) onto the stage's AgentRun so the
+			// AgentRun controller — which cannot see the workflow — resolves
+			// and delivers it uniformly (ADR 0018).
+			Execution: resolveExecution(stage.Execution, agent.Spec.Execution),
+			// Stamp coerced workflow params so the AgentRun controller can
+			// write the params.json workflow section and substitute
+			// $(workflow.<name>) without seeing the AgentWorkflow (ADR 0018).
+			WorkflowParams: workflowRaw,
 		},
 	}
 
@@ -465,8 +581,60 @@ func (r *AgentWorkflowRunReconciler) patchRunStatus(
 	return ctrl.Result{}, nil
 }
 
+// effectiveTTL resolves a terminal AgentWorkflowRun's lifetime: the run's own
+// spec.ttlSecondsAfterFinished wins, then the controller's
+// DefaultTTLAfterFinished. The bool is false when neither is set, meaning GC
+// is disabled and the run is kept until deleted manually.
+func (r *AgentWorkflowRunReconciler) effectiveTTL(pbRun *konveyoriov1alpha1.AgentWorkflowRun) (time.Duration, bool) {
+	if pbRun.Spec.TTLSecondsAfterFinished != nil {
+		return time.Duration(*pbRun.Spec.TTLSecondsAfterFinished) * time.Second, true
+	}
+	if r.DefaultTTLAfterFinished != nil {
+		return *r.DefaultTTLAfterFinished, true
+	}
+	return 0, false
+}
+
+// reconcileTTL garbage-collects a terminal AgentWorkflowRun once its TTL
+// elapses. With no effective TTL the run is kept. The finish anchor is
+// CompletionTime; a terminal run that never recorded one gets it stamped now
+// so expiry is deterministic across controller restarts. Before the TTL
+// elapses the reconcile is requeued for the remaining time; once it has, the
+// run is deleted — cascading to the child AgentRuns it owns via owner
+// references.
+func (r *AgentWorkflowRunReconciler) reconcileTTL(
+	ctx context.Context,
+	pbRun *konveyoriov1alpha1.AgentWorkflowRun,
+	original *konveyoriov1alpha1.AgentWorkflowRun,
+) (ctrl.Result, error) {
+	ttl, ok := r.effectiveTTL(pbRun)
+	if !ok {
+		return ctrl.Result{}, nil
+	}
+
+	// Anchor the clock: a terminal run with no CompletionTime records one now.
+	if pbRun.Status.CompletionTime == nil {
+		now := metav1.Now()
+		pbRun.Status.CompletionTime = &now
+		return r.patchRunStatus(ctx, pbRun, original)
+	}
+
+	if remaining := time.Until(pbRun.Status.CompletionTime.Add(ttl)); remaining > 0 {
+		return ctrl.Result{RequeueAfter: remaining}, nil
+	}
+
+	log.FromContext(ctx).Info("Deleting finished AgentWorkflowRun (TTL elapsed)",
+		"agentWorkflowRun", pbRun.Name, "ttl", ttl.String(), "completionTime", pbRun.Status.CompletionTime)
+	if err := r.Delete(ctx, pbRun); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	return ctrl.Result{}, nil
+}
+
 // SetupWithManager sets up the controller with the Manager.
 func (r *AgentWorkflowRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	r.apiReader = mgr.GetAPIReader()
+
 	// Index AgentWorkflowRuns by workflowRef for efficient reverse lookup
 	// when an AgentWorkflow changes.
 	if err := mgr.GetFieldIndexer().IndexField(
@@ -484,6 +652,13 @@ func (r *AgentWorkflowRunReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&konveyoriov1alpha1.AgentWorkflowRun{}).
 		Owns(&konveyoriov1alpha1.AgentRun{}).
+		// The owner watch remains authoritative. This label map is only the
+		// recovery source for an ownerless stage AgentRun.
+		Watches(
+			&konveyoriov1alpha1.AgentRun{},
+			handler.EnqueueRequestsFromMapFunc(workflowRunForLabeledResource),
+			builder.WithPredicates(predicate.NewPredicateFuncs(isOwnerlessManagedWorkflowRunResource)),
+		).
 		Watches(
 			&konveyoriov1alpha1.AgentWorkflow{},
 			handler.EnqueueRequestsFromMapFunc(r.findRunsForWorkflow),
@@ -516,8 +691,7 @@ func (r *AgentWorkflowRunReconciler) findRunsForWorkflow(
 	var requests []reconcile.Request
 	for _, run := range runList.Items {
 		// Only re-reconcile non-terminal runs.
-		if run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseSucceeded ||
-			run.Status.Phase == konveyoriov1alpha1.AgentRunPhaseFailed {
+		if isTerminalPhase(run.Status.Phase) {
 			continue
 		}
 		requests = append(requests, reconcile.Request{

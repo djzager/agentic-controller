@@ -51,6 +51,20 @@ manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and Cust
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.
 	"$(CONTROLLER_GEN)" object:headerFile="hack/boilerplate.go.txt",year=$(YEAR) paths="./..." paths="./api/..."
 
+.PHONY: generate-adr-index
+generate-adr-index: ## Generate the ADR index and reconciliation table from ADR front matter.
+	hack/generate-adr-index.sh
+
+.PHONY: verify-adr-index
+verify-adr-index: ## Verify that generated ADR indexes match ADR front matter.
+	hack/generate-adr-index.sh --check
+
+DECK ?= docs/slides/demo-2026-09-30.md
+
+.PHONY: slides
+slides: ## Render a Marp deck to PDF. Override the source with DECK=<path>.
+	npx --yes @marp-team/marp-cli --theme docs/slides/konveyor-theme.css --allow-local-files "$(DECK)" -o "$(DECK:.md=.pdf)"
+
 .PHONY: fmt
 fmt: ## Run go fmt against code.
 	go fmt ./...
@@ -153,9 +167,31 @@ controller-agent-build: ## Build the controller's test/verification agent image.
 controller-agent-push: controller-agent-build ## Build and push the controller's test/verification agent image.
 	$(CONTAINER_TOOL) push $(CONTROLLER_AGENT_IMG)
 
+# Compiling goose is ~35 of the ~38 minutes an agent-base build takes. Point
+# GOOSE_IMAGE at a prebuilt goose image (see goose-dist-build) and the build
+# skips the compile entirely; leave it empty and goose is built from source,
+# which is what a plain local build and the release build both do.
+#
+# Only agent-base-build honours it. agent-images-multiarch-build deliberately
+# does not: goose-dist is built for one architecture, so handing it to a
+# --platform build would put that one binary in every entry of the manifest.
+GOOSE_IMAGE ?=
+GOOSE_BUILD_ARG = $(if $(GOOSE_IMAGE),--build-arg GOOSE_IMAGE=$(GOOSE_IMAGE))
+# The default tag carries the version the Containerfile names, so a goose-dist
+# image built before a GOOSE_VERSION bump cannot be silently reused after one:
+# podman's default --pull=missing finds a stale :latest and says nothing, and
+# you debug the new goose against the old binary. CI never sees this default,
+# the action passes its own version+digest name.
+GOOSE_DIST_VERSION := $(shell sed -n 's/^ARG GOOSE_VERSION=//p' images/agent-base/Containerfile | head -1)
+GOOSE_DIST_IMG ?= localhost/goose-dist:$(GOOSE_DIST_VERSION)
+
+.PHONY: goose-dist-build
+goose-dist-build: ## Build just the goose binary as a standalone image, for reuse as GOOSE_IMAGE.
+	$(CONTAINER_TOOL) build --target goose-dist -t $(GOOSE_DIST_IMG) -f images/agent-base/Containerfile .
+
 .PHONY: agent-base-build
-agent-base-build: ## Build the base agent image (goose + git + Python + graphify + harness binary).
-	$(CONTAINER_TOOL) build -t $(AGENT_BASE_IMG) -f images/agent-base/Containerfile .
+agent-base-build: ## Build the base agent image (goose + git + harness binary).
+	$(CONTAINER_TOOL) build $(GOOSE_BUILD_ARG) -t $(AGENT_BASE_IMG) -f images/agent-base/Containerfile .
 
 .PHONY: agent-java-build
 agent-java-build: agent-base-build ## Build the Java agent image (JDK 21 + Maven).
@@ -300,16 +336,17 @@ SKILL_IMAGE ?= quay.io/konveyor/skills:latest
 
 .PHONY: skill-build
 skill-build: ## Build the skill bundle image.
-	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f skills/Containerfile skills
+	$(CONTAINER_TOOL) build -t $(SKILL_IMAGE) -f catalog/Containerfile .
 
 .PHONY: skill-push
 skill-push: skill-build ## Build and push the skill bundle image.
 	$(CONTAINER_TOOL) push $(SKILL_IMAGE)
 
 # A skill is one directory deep, so a directory of directories is not itself a
-# bundle and its contents are not seen. skills/examples/ is therefore named
-# separately rather than being silently skipped.
-SKILL_TREES ?= skills skills/examples
+# bundle and its contents are not seen. Each tree is therefore named: the
+# shipped bundle (catalog/skills), the single-skill worked examples
+# (catalog/examples), and the repo's own maintainer workflow skills (skills).
+SKILL_TREES ?= catalog/skills catalog/examples skills
 
 .PHONY: skill-validate
 skill-validate: ## Check every SKILL.md frontmatter parses and is complete.

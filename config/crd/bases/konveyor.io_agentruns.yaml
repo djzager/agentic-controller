@@ -36,9 +36,10 @@ spec:
         description: |-
           AgentRun is a request to execute a single Agent with specific selections.
           It references an Agent, selects a gateway, carries instructions and
-          key-value parameters (injected as env vars into the Sandbox). The
-          controller validates, resolves skills to ImageVolumes, creates a Sandbox,
-          and tracks status to completion.
+          key-value parameters (delivered via /run/konveyor/params.json and
+          referenced in prompt text as $(agent.<name>) / $(workflow.<name>) — ADR
+          0009). The controller validates, resolves skills to ImageVolumes, creates
+          a Sandbox, and tracks status to completion.
         properties:
           apiVersion:
             description: |-
@@ -274,24 +275,194 @@ spec:
                       x-kubernetes-map-type: atomic
                   type: object
                 type: array
+              execution:
+                description: |-
+                  Execution carries the resolved supervision mode and budget limits
+                  for this run. For a standalone run these are set by the run
+                  creator (mode) and default from the Agent (limits). For a workflow
+                  stage the AgentWorkflowRun controller stamps the stage-resolved
+                  values here (ADR 0018). Unset fields resolve against the Agent's
+                  Execution defaults; mode resolves to auto when unset everywhere.
+                properties:
+                  askUser:
+                    description: |-
+                      AskUser gives the agent the ask_user tool: it may stop mid-turn and
+                      put a question to the viewers attached to the run (ADR 0017). An
+                      unanswered question fails the run — the harness never answers for
+                      the human — so set this only for a run somebody will be watching.
+                      Defaults to false: a run nobody opted into supervising cannot be
+                      failed by a question nobody saw.
+                    type: boolean
+                  maxCost:
+                    description: |-
+                      MaxCost is the maximum cumulative cost in USD before wind-down,
+                      as a decimal string (e.g. "10.00"). USD only: the enforcement
+                      threshold must match the currency of reported usage, which is USD
+                      across the supported runtimes. Reported cost may carry an ISO 4217
+                      currency; this threshold does not.
+                    pattern: ^[0-9]+(\.[0-9]{1,2})?$
+                    type: string
+                  maxTurns:
+                    description: |-
+                      MaxTurns is the maximum number of turns before wind-down. The unit
+                      is runtime-defined (e.g. Goose counts turns without user input).
+                    minimum: 1
+                    type: integer
+                  mode:
+                    description: Mode is the supervision policy for tool calls. Defaults
+                      to auto.
+                    enum:
+                    - auto
+                    - approve
+                    type: string
+                type: object
+              fileMounts:
+                description: |-
+                  FileMounts attaches Secrets or ConfigMaps into the Sandbox
+                  container as read-only files, for config or credentials a skill or
+                  tool reads from disk rather than from the environment. Each
+                  mountPath is validated against the controller-managed mounts and the
+                  run fails terminally (InvalidFileMounts) if any collides.
+                items:
+                  description: |-
+                    FileMount attaches a Secret or ConfigMap into the Sandbox container as
+                    files on disk, mounted read-only. It is the file-shaped sibling of
+                    spec.envFrom: use it for config or credentials a skill or tool reads
+                    from a path (e.g. a config file, a service-account JSON) rather than
+                    from an environment variable. The controller passes the source through
+                    as a Kubernetes primitive. Before creating the Sandbox it checks source
+                    existence and projected keys, without interpreting their values.
+
+                    Exactly one of SecretName or ConfigMapName must be set. MountPath is
+                    rejected at run creation if it lands on, under, or above a
+                    controller-managed mount (/opt/skills, /opt/skills-src, /run/konveyor,
+                    /workspace, /tmp), the Kubernetes service-account token mount, or another
+                    user mount. Invalid paths and missing items keys or subPaths fail the run
+                    with InvalidFileMounts. Missing sources are retried with Succeeded=Unknown
+                    and reason FileMountSourceNotFound, allowing apply-order races to recover.
+                  properties:
+                    configMapName:
+                      description: |-
+                        ConfigMapName names a ConfigMap in the same namespace to mount.
+                        Mutually exclusive with SecretName.
+                      minLength: 1
+                      type: string
+                    items:
+                      description: |-
+                        Items selects and optionally renames individual keys from the
+                        source object. When empty, every key is projected
+                        under MountPath using the key as the filename.
+                      items:
+                        description: Maps a string key to a path within a volume.
+                        properties:
+                          key:
+                            description: key is the key to project.
+                            type: string
+                          mode:
+                            description: |-
+                              mode is Optional: mode bits used to set permissions on this file.
+                              Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511.
+                              YAML accepts both octal and decimal values, JSON requires decimal values for mode bits.
+                              If not specified, the volume defaultMode will be used.
+                              This might be in conflict with other options that affect the file
+                              mode, like fsGroup, and the result can be other mode bits set.
+                            format: int32
+                            type: integer
+                          path:
+                            description: |-
+                              path is the relative path of the file to map the key to.
+                              May not be an absolute path.
+                              May not contain the path element '..'.
+                              May not start with the string '..'.
+                            type: string
+                        required:
+                        - key
+                        - path
+                        type: object
+                      type: array
+                    mountPath:
+                      description: |-
+                        MountPath is the absolute path in the Sandbox container where the
+                        content is mounted. When SubPath is empty the whole object is
+                        mounted as a directory here (one file per key); when SubPath is set
+                        MountPath is the file path a single key lands at. Must not collide
+                        with a reserved mount or overlap another mount after path cleaning.
+                        The cleaned path is used in the Sandbox.
+                      minLength: 1
+                      type: string
+                    secretName:
+                      description: |-
+                        SecretName names a Secret in the same namespace to mount. Mutually
+                        exclusive with ConfigMapName.
+                      minLength: 1
+                      type: string
+                    subPath:
+                      description: |-
+                        SubPath mounts a single key from the source object as a file at
+                        MountPath instead of mounting the whole object as a directory. Its
+                        value is a path in the projected volume: a key name by default, or
+                        an Items path when keys are selected or renamed. Projected directories
+                        may also be mounted.
+                      type: string
+                  required:
+                  - mountPath
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of secretName or configMapName must be set
+                    rule: has(self.secretName) != has(self.configMapName)
+                type: array
+                x-kubernetes-list-map-keys:
+                - mountPath
+                x-kubernetes-list-type: map
               gateway:
                 description: |-
                   Gateway selects the Gateway (provider/model combination) for this
-                  run. Must be one of the gateways declared on the referenced Agent.
+                  run. When the referenced Agent declares gateways it must be one of
+                  them; when the Agent declares none, any Ready Gateway may be named.
+                  May be omitted only when the Agent declares exactly one gateway, which
+                  is then used by default.
                 minLength: 1
                 type: string
+              gitConfig:
+                description: |-
+                  GitConfig overrides the Agent's git commit identity for this run.
+                  When set it replaces the Agent's GitConfig wholesale (name and email
+                  together); when unset the run uses the Agent's identity, then the
+                  harness default.
+                properties:
+                  userEmail:
+                    description: |-
+                      UserEmail maps to git config user.email for the agent's commits.
+                      Must be a bare address (local@domain) with no angle brackets,
+                      whitespace, or control characters — go-git wraps it in <> unescaped.
+                    maxLength: 254
+                    pattern: ^[^\x00-\x20\x7f<>@]+@[^\x00-\x20\x7f<>@]+\.[^\x00-\x20\x7f<>@]+$
+                    type: string
+                  userName:
+                    description: |-
+                      UserName maps to git config user.name for the agent's commits.
+                      go-git does not escape the identity, so reject angle brackets and
+                      control characters that would corrupt or forge the commit ident.
+                    maxLength: 128
+                    pattern: ^[^\x00-\x1f\x7f<>]+$
+                    type: string
+                type: object
+                x-kubernetes-validations:
+                - message: userName and userEmail must both be set
+                  rule: has(self.userName) && has(self.userEmail)
               instructions:
                 description: |-
                   Instructions are task-specific instructions for this run.
-                  Composed with the Agent's prompt at execution time.
+                  Composed with the Agent's prompt at execution time. Supports
+                  $(agent.<name>) / $(workflow.<name>) substitution.
                 type: string
               params:
                 description: |-
                   Params supplies values for the Agent's declared parameters.
-                  Injected as KONVEYOR_PARAM_{NAME} env vars into the Sandbox.
+                  Resolved values are written to /run/konveyor/params.json in the
+                  Sandbox (see ADR 0009); they are not injected as env vars.
                 items:
-                  description: AgentRunParam supplies a value for a declared Agent
-                    parameter.
+                  description: ParamValue supplies a value for a declared Agent parameter.
                   properties:
                     name:
                       description: Name is the parameter name, matching an Agent param
@@ -309,6 +480,43 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              startupDeadlineSeconds:
+                description: |-
+                  StartupDeadlineSeconds bounds how long a run may take to reach a
+                  running state before the controller fails it, guarding against pods
+                  that never start — stuck unschedulable or on a slow image pull.
+                  Measured from Sandbox creation. Fatal pod errors (ImagePullBackOff,
+                  CrashLoopBackOff, InvalidImageName, CreateContainerConfigError) fail
+                  the run immediately regardless of this deadline. 0 or unset uses the
+                  controller default (--agentrun-startup-deadline); when neither is
+                  set, no deadline is enforced and only fatal pod errors fail the run.
+                format: int32
+                minimum: 0
+                type: integer
+              ttlSecondsAfterFinished:
+                description: |-
+                  TTLSecondsAfterFinished limits the lifetime of an AgentRun that has
+                  reached a terminal phase (Succeeded or Failed), mirroring Job's
+                  ttlSecondsAfterFinished. When set, the controller deletes the run this
+                  many seconds after it finished — cascading to everything it owns
+                  (Sandbox, pod, per-run ConfigMaps/Secrets) via owner references — so
+                  terminal runs do not accumulate. Zero deletes as soon as the run
+                  finishes. When unset, the run is kept until deleted manually, unless the
+                  controller is configured with a default TTL.
+                format: int32
+                minimum: 0
+                type: integer
+              workflowParams:
+                description: |-
+                  WorkflowParams carries the resolved, type-coerced workflow-level
+                  parameters for a stage run, as a JSON object stamped by the
+                  AgentWorkflowRun controller (ADR 0018). The AgentRun controller
+                  writes it verbatim to the "workflow" section of params.json and
+                  uses its values for $(workflow.<name>) substitution. Empty for
+                  standalone runs. Coercion happens in the workflow controller,
+                  which owns the AgentWorkflow param declarations.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - agentRef
             type: object
@@ -328,7 +536,10 @@ spec:
                   AgentRun's state. Ready tracks the run's overall outcome (False
                   while in progress with the current step as its reason, True on
                   success); ACPReady tracks whether the agent's ACP endpoint accepts
-                  connections (see AgentRunConditionACPReady).
+                  connections (see AgentRunConditionACPReady). Succeeded is the
+                  terminal outcome (see AgentRunConditionSucceeded): Unknown while
+                  running, True on clean completion, False with a reason
+                  (Failed, LimitReached) otherwise.
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -437,6 +648,15 @@ spec:
                   creation time if the pod finished before the controller saw it run).
                 format: date-time
                 type: string
+              terminationData:
+                description: |-
+                  TerminationData is the raw JSON the harness wrote to the pod's
+                  termination message (/dev/termination-log) on exit — typically a
+                  usage/cost report. The controller copies it verbatim and never
+                  interprets it; platform-specific UIs read the harness's schema
+                  (ADR 0011/0018). Absent if the harness wrote nothing parseable.
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
             type: object
         type: object
     served: true

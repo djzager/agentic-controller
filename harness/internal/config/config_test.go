@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,7 @@ func clearKonveyorEnv(t *testing.T) {
 		"KONVEYOR_MODEL_PRIMARY_PROVIDER",
 		"KONVEYOR_MODEL_PRIMARY_ENDPOINT",
 		"KONVEYOR_MODEL_PRIMARY_API_KEY",
-		"KONVEYOR_PARAM_MAX_TURNS",
+		"HARNESS_PARAMS_FILE",
 		"HUB_BASE_URL",
 		"HUB_TOKEN",
 		"APP_ID",
@@ -35,7 +36,11 @@ func clearKonveyorEnv(t *testing.T) {
 		"HUB_TOKEN_ID",
 		"HARNESS_ACP_TEE",
 		"HARNESS_HITL_STEER",
+		"HARNESS_HITL_ASK",
 		"HARNESS_HITL_TIMEOUT_SECONDS",
+		"HARNESS_GIT_WRITE_CHECK",
+		"KONVEYOR_GIT_AUTHOR_NAME",
+		"KONVEYOR_GIT_AUTHOR_EMAIL",
 	} {
 		t.Setenv(k, "")
 		os.Unsetenv(k)
@@ -134,10 +139,10 @@ func TestLoadFromEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("reads optional param overrides", func(t *testing.T) {
+	t.Run("overrides max turns from params.json execution section", func(t *testing.T) {
 		clearKonveyorEnv(t)
 		setRequiredEnv(t)
-		t.Setenv("KONVEYOR_PARAM_MAX_TURNS", "500")
+		t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{"execution": {"maxTurns": 500}}`))
 
 		cfg, err := LoadFromEnv()
 		if err != nil {
@@ -147,6 +152,207 @@ func TestLoadFromEnv(t *testing.T) {
 			t.Errorf("MaxTurns = %d, want 500", cfg.MaxTurns)
 		}
 	})
+
+	t.Run("defaults git author when unset", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GitAuthorName != DefaultGitAuthorName {
+			t.Errorf("GitAuthorName = %q, want %q", cfg.GitAuthorName, DefaultGitAuthorName)
+		}
+		if cfg.GitAuthorEmail != DefaultGitAuthorEmail {
+			t.Errorf("GitAuthorEmail = %q, want %q", cfg.GitAuthorEmail, DefaultGitAuthorEmail)
+		}
+	})
+
+	t.Run("reads git author from env", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("KONVEYOR_GIT_AUTHOR_NAME", "Jane Dev")
+		t.Setenv("KONVEYOR_GIT_AUTHOR_EMAIL", "jane@example.com")
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.GitAuthorName != "Jane Dev" {
+			t.Errorf("GitAuthorName = %q, want %q", cfg.GitAuthorName, "Jane Dev")
+		}
+		if cfg.GitAuthorEmail != "jane@example.com" {
+			t.Errorf("GitAuthorEmail = %q, want %q", cfg.GitAuthorEmail, "jane@example.com")
+		}
+	})
+
+	t.Run("falls back to the default pair when only one git author var is set", func(t *testing.T) {
+		// A half-set identity must not mix a supplied name with the default
+		// email; the pair defaults atomically.
+		for _, tc := range []struct {
+			name     string
+			envName  string
+			envValue string
+		}{
+			{name: "name only", envName: "KONVEYOR_GIT_AUTHOR_NAME", envValue: "Jane Dev"},
+			{name: "email only", envName: "KONVEYOR_GIT_AUTHOR_EMAIL", envValue: "jane@example.com"},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				clearKonveyorEnv(t)
+				setRequiredEnv(t)
+				t.Setenv(tc.envName, tc.envValue)
+
+				cfg, err := LoadFromEnv()
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if cfg.GitAuthorName != DefaultGitAuthorName {
+					t.Errorf("GitAuthorName = %q, want %q", cfg.GitAuthorName, DefaultGitAuthorName)
+				}
+				if cfg.GitAuthorEmail != DefaultGitAuthorEmail {
+					t.Errorf("GitAuthorEmail = %q, want %q", cfg.GitAuthorEmail, DefaultGitAuthorEmail)
+				}
+			})
+		}
+	})
+
+	t.Run("no params.json leaves the default max turns", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("HARNESS_PARAMS_FILE", filepath.Join(t.TempDir(), "does-not-exist.json"))
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.MaxTurns != DefaultMaxTurns {
+			t.Errorf("MaxTurns = %d, want default %d", cfg.MaxTurns, DefaultMaxTurns)
+		}
+	})
+
+	t.Run("errors on malformed params.json", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, "{not json"))
+
+		if _, err := LoadFromEnv(); err == nil {
+			t.Fatal("expected error for malformed params.json, got nil")
+		}
+	})
+
+	t.Run("populates Params from params.json for prompt rendering", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{
+			"workflow": {"application_name": "coolstore"},
+			"agent": {"source_url": "https://github.com/example/app"}
+		}`))
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Params.Workflow["application_name"] != "coolstore" {
+			t.Errorf("Params.Workflow[application_name] = %v", cfg.Params.Workflow["application_name"])
+		}
+		if cfg.Params.Agent["source_url"] != "https://github.com/example/app" {
+			t.Errorf("Params.Agent[source_url] = %v", cfg.Params.Agent["source_url"])
+		}
+	})
+
+	t.Run("computes CostLimit from execution.maxCost with the reserve fraction applied", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{"execution": {"maxCost": "10.00"}}`))
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.CostLimit != 8.5 {
+			t.Errorf("CostLimit = %v, want 8.5 (10.00 * 0.85)", cfg.CostLimit)
+		}
+		if cfg.MaxCost != 10.00 {
+			t.Errorf("MaxCost = %v, want 10.00 (unreserved)", cfg.MaxCost)
+		}
+	})
+
+	t.Run("no maxCost leaves CostLimit and MaxCost at zero", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+
+		cfg, err := LoadFromEnv()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.CostLimit != 0 {
+			t.Errorf("CostLimit = %v, want 0", cfg.CostLimit)
+		}
+		if cfg.MaxCost != 0 {
+			t.Errorf("MaxCost = %v, want 0", cfg.MaxCost)
+		}
+	})
+
+	t.Run("errors on non-numeric maxCost", func(t *testing.T) {
+		clearKonveyorEnv(t)
+		setRequiredEnv(t)
+		t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{"execution": {"maxCost": "not-a-number"}}`))
+
+		if _, err := LoadFromEnv(); err == nil {
+			t.Fatal("expected error for non-numeric maxCost, got nil")
+		}
+	})
+
+	for _, val := range []string{"0", "0.00"} {
+		t.Run("explicit zero maxCost "+val+" leaves CostLimit and MaxCost at zero", func(t *testing.T) {
+			clearKonveyorEnv(t)
+			setRequiredEnv(t)
+			t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{"execution": {"maxCost": "`+val+`"}}`))
+
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if cfg.CostLimit != 0 {
+				t.Errorf("CostLimit = %v, want 0", cfg.CostLimit)
+			}
+			if cfg.MaxCost != 0 {
+				t.Errorf("MaxCost = %v, want 0", cfg.MaxCost)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"NaN", "NaN"},
+		{"positive infinity", "+Inf"},
+		{"negative infinity", "-Inf"},
+		{"negative", "-1.5"},
+	} {
+		tc := tc
+		t.Run("errors on invalid maxCost: "+tc.name, func(t *testing.T) {
+			clearKonveyorEnv(t)
+			setRequiredEnv(t)
+			t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, `{"execution": {"maxCost": "`+tc.value+`"}}`))
+
+			if _, err := LoadFromEnv(); err == nil {
+				t.Fatalf("expected error for maxCost=%q, got nil", tc.value)
+			}
+		})
+	}
+}
+
+// writeParamsFile writes content to a temp params.json and returns its path.
+func writeParamsFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "params.json")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write params file: %v", err)
+	}
+	return path
 }
 
 // The legacy KONVEYOR_MODEL_PRIMARY_* env vars are still read as
@@ -333,5 +539,63 @@ func TestHITLTimeoutClampedAndSteerSwitch(t *testing.T) {
 	}
 	if cfg.HITLSteer {
 		t.Error("HARNESS_HITL_STEER=OFF (padded, uppercase) should disable steering")
+	}
+}
+
+// ask_user can fail a run (an unanswered question, ADR 0017), so unlike
+// the tee and steering it is opt-in: off by default, on via the run's
+// execution.askUser or HARNESS_HITL_ASK=on, and HARNESS_HITL_ASK=off beats
+// both.
+func TestHITLAskIsOptIn(t *testing.T) {
+	const askOn = `{"execution": {"askUser": true}}`
+	for _, tc := range []struct {
+		name, params, env string
+		want              bool
+	}{
+		{name: "default", want: false},
+		{name: "run opts in", params: askOn, want: true},
+		{name: "env opts in", env: " ON ", want: true},
+		{name: "env off beats the run", params: askOn, env: "off", want: false},
+		{name: "unrecognised env is not an opt-in", env: "maybe", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearKonveyorEnv(t)
+			setRequiredEnv(t)
+			if tc.params != "" {
+				t.Setenv("HARNESS_PARAMS_FILE", writeParamsFile(t, tc.params))
+			}
+			if tc.env != "" {
+				t.Setenv("HARNESS_HITL_ASK", tc.env)
+			}
+			cfg, err := LoadFromEnv()
+			if err != nil {
+				t.Fatalf("LoadFromEnv: %v", err)
+			}
+			if cfg.HITLAsk != tc.want {
+				t.Errorf("HITLAsk = %v, want %v", cfg.HITLAsk, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitWriteCheckSwitch(t *testing.T) {
+	clearKonveyorEnv(t)
+	setRequiredEnv(t)
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if !cfg.GitWriteCheck {
+		t.Error("GitWriteCheck should default on: a run that cannot push must fail before it spends turns")
+	}
+
+	t.Setenv("HARNESS_GIT_WRITE_CHECK", " OFF ")
+	cfg, err = LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv: %v", err)
+	}
+	if cfg.GitWriteCheck {
+		t.Error("HARNESS_GIT_WRITE_CHECK=OFF (padded, uppercase) should disable the push pre-flight")
 	}
 }

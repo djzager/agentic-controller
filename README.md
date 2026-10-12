@@ -31,7 +31,7 @@ CI pipeline) resolves application metadata before creating the CR.
 ### Key design decisions
 
 - **Agent Sandbox** is a hard dependency for workload execution
-- **Git credentials** stay in the harness — the agent does not receive
+- **Git credentials** stay in the entry point — the agent does not receive
   push credentials
 - **Skills** are Agent Skills directories, delivered as ordinary OCI images
   mounted via ImageVolumes (K8s 1.33+), git clones, or inline content
@@ -42,6 +42,25 @@ CI pipeline) resolves application metadata before creating the CR.
 
 See `docs/adr/` for the full set of architecture decision records.
 
+## Authoring images and skills
+
+- [Create an agentic base image](docs/agent-base-images.md) — extend
+  `agent-base`, build language images, publish them, and understand the
+  harness contract.
+- [Create a SkillCard image](docs/skill-card-images.md) — author, validate,
+  package, publish, and reference skills and rules.
+
+## Getting started
+
+See [docs/getting-started.md](docs/getting-started.md) for a
+step-by-step guide to deploying the controller, configuring a Gateway
+with LLM credentials, and creating your first AgentRun.
+
+## End-to-end testing
+
+See [test/e2e/README.md](test/e2e/README.md) for Kind setup and commands for
+the full pipeline, skill delivery, workflow reconciliation, and Go E2E suites.
+
 ## Project structure
 
 ```
@@ -51,9 +70,24 @@ agentic-controller/
   internal/controller/    Controller implementations
   internal/skills/        Skill assembly, and SkillCard materialization
   cmd/skill-loader/       The init container and enumeration Job binary
+  config/defaults/        Curated content the operator installs on enable
+                            (skill catalog, stage Agents, AgentWorkflow) —
+                            applied verbatim, so no Gateways or gateway refs
+  config/samples/         Illustrative CRs you copy and edit (per-provider
+                            Gateways, a standalone Agent + AgentRun) — never
+                            auto-installed
+  docs/                   Documentation (getting started, entry point contract, API specs)
   docs/adr/               Architecture Decision Records
-  harness/                In-pod runner: git lifecycle, prompt assembly, ACP
-  skills/                 Agent skills, both runtime and contributor-facing
+  harness/                In-pod entry point: git lifecycle, parameter delivery, ACP tee
+  skills/                 Agent Skills directories:
+    plan, execute,          shipped in the bundle image built by
+    verify,                 skills/Containerfile; a SkillCard selects
+    javaee-to-quarkus         one of them via subPath
+    grill-me,               contributor skills for developing ON this
+    grill-with-docs,        repo — deliberately not in the bundle image
+    submit-pr
+    examples/               SkillCard fixtures (not shipped)
+    Containerfile           builds the skill bundle image
   CONTEXT.md              Domain glossary
   AGENTS.md               Agent-facing instructions
 ```
@@ -62,7 +96,7 @@ agentic-controller/
 
 - Kubernetes 1.33+ (ImageVolume GA)
 - OpenShift 4.20+
-- Agent Sandbox v0.5.x
+- Agent Sandbox v1.0.x
 
 ## Related projects
 

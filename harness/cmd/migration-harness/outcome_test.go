@@ -1,0 +1,488 @@
+package main
+
+import (
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"unicode/utf8"
+
+	"github.com/konveyor/migration-harness/internal/git"
+
+	"github.com/konveyor/migration-harness/internal/acp"
+)
+
+func TestOutcomeExitCode(t *testing.T) {
+	cases := []struct {
+		o    outcome
+		want int
+	}{
+		{outcomeSucceeded, 0},
+		{outcomeFailed, 1},
+		{outcomeLimitReached, 2},
+	}
+	for _, c := range cases {
+		if got := c.o.exitCode(); got != c.want {
+			t.Errorf("%v.exitCode() = %d, want %d", c.o, got, c.want)
+		}
+	}
+}
+
+func TestClassifyOutcome(t *testing.T) {
+	cases := []struct {
+		name           string
+		result         *acp.PromptResult
+		err            error
+		nativeMaxTurns int
+		providerError  bool
+		wantOut        outcome
+		wantLimit      limitKind
+	}{
+		{
+			// #231: goose renders a refused model call as prose and ends
+			// the turn with end_turn; with no turn used nothing happened.
+			name:          "provider error before any turn is a failure",
+			result:        &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 0},
+			providerError: true,
+			wantOut:       outcomeFailed,
+			wantLimit:     limitNone,
+		},
+		{
+			name:          "provider error after real work keeps the turn's outcome",
+			result:        &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 7},
+			providerError: true,
+			wantOut:       outcomeSucceeded,
+			wantLimit:     limitNone,
+		},
+		{
+			name:           "provider error at the native limit is still limitReached",
+			result:         &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 34},
+			nativeMaxTurns: 34,
+			providerError:  true,
+			wantOut:        outcomeLimitReached,
+			wantLimit:      limitMaxTurns,
+		},
+		{
+			name:      "error is a failure",
+			result:    nil,
+			err:       errors.New("boom"),
+			wantOut:   outcomeFailed,
+			wantLimit: limitNone,
+		},
+		{
+			name:      "natural completion succeeds",
+			result:    &acp.PromptResult{StopReason: "end_turn"},
+			wantOut:   outcomeSucceeded,
+			wantLimit: limitNone,
+		},
+		{
+			name:      "native turn limit is limitReached/maxTurns",
+			result:    &acp.PromptResult{StopReason: "max_turn_requests"},
+			wantOut:   outcomeLimitReached,
+			wantLimit: limitMaxTurns,
+		},
+		{
+			name:      "harness-triggered cost cancel is limitReached/maxCost",
+			result:    &acp.PromptResult{StopReason: "cancelled", CostLimitReached: true},
+			wantOut:   outcomeLimitReached,
+			wantLimit: limitMaxCost,
+		},
+		{
+			name:      "viewer cancel (no cost trigger) is a failure",
+			result:    &acp.PromptResult{StopReason: "cancelled", CostLimitReached: false},
+			wantOut:   outcomeFailed,
+			wantLimit: limitNone,
+		},
+		{
+			// Live-tested against goose 1.36.0 + Vertex AI: hitting
+			// GOOSE_MAX_TURNS does not produce a graceful stopReason — the
+			// websocket connection drops instead. TurnsUsed reaching the
+			// configured native ceiling plus the abrupt disconnect is the
+			// best available signal that the native limit fired.
+			name:           "connection lost with TurnsUsed == nativeMaxTurns is limitReached/maxTurns",
+			result:         &acp.PromptResult{TurnsUsed: 9},
+			err:            acp.ErrConnectionLost,
+			nativeMaxTurns: 9,
+			wantOut:        outcomeLimitReached,
+			wantLimit:      limitMaxTurns,
+		},
+		{
+			// A transient disconnect before the native ceiling is reached
+			// must not be misclassified as a turn limit — it is a genuine
+			// failure (network blip, pod restart, etc.).
+			name:           "connection lost with TurnsUsed < nativeMaxTurns is a genuine failure",
+			result:         &acp.PromptResult{TurnsUsed: 9},
+			err:            acp.ErrConnectionLost,
+			nativeMaxTurns: 170,
+			wantOut:        outcomeFailed,
+			wantLimit:      limitNone,
+		},
+		{
+			// nativeMaxTurns == 0 means maxTurns was not configured; an
+			// abrupt disconnect with no ceiling to compare against must not
+			// be mistaken for a limit.
+			name:           "connection lost with nativeMaxTurns unset (0) is a genuine failure",
+			result:         &acp.PromptResult{TurnsUsed: 9},
+			err:            acp.ErrConnectionLost,
+			nativeMaxTurns: 0,
+			wantOut:        outcomeFailed,
+			wantLimit:      limitNone,
+		},
+		{
+			name:      "connection lost before any turn ran is a genuine failure",
+			result:    &acp.PromptResult{TurnsUsed: 0},
+			err:       acp.ErrConnectionLost,
+			wantOut:   outcomeFailed,
+			wantLimit: limitNone,
+		},
+		{
+			name:      "connection lost with nil result is a genuine failure",
+			result:    nil,
+			err:       acp.ErrConnectionLost,
+			wantOut:   outcomeFailed,
+			wantLimit: limitNone,
+		},
+		{
+			// Live-tested against goose 1.36.0 + Vertex AI: goose reports a
+			// clean "end_turn" even when it silently truncated the task at
+			// its native GOOSE_MAX_TURNS ceiling — stopReason alone cannot
+			// tell "genuinely done" apart from "cut off by the limit."
+			// TurnsUsed reaching the configured native ceiling is the only
+			// reliable signal available.
+			name:           "graceful end_turn that exactly used the native ceiling is limitReached/maxTurns",
+			result:         &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 2},
+			nativeMaxTurns: 2,
+			wantOut:        outcomeLimitReached,
+			wantLimit:      limitMaxTurns,
+		},
+		{
+			name:           "graceful end_turn well under the native ceiling succeeds",
+			result:         &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 3},
+			nativeMaxTurns: 170,
+			wantOut:        outcomeSucceeded,
+			wantLimit:      limitNone,
+		},
+		{
+			name:           "nativeMaxTurns unset (0) never triggers the ceiling check",
+			result:         &acp.PromptResult{StopReason: "end_turn", TurnsUsed: 0},
+			nativeMaxTurns: 0,
+			wantOut:        outcomeSucceeded,
+			wantLimit:      limitNone,
+		},
+		{
+			name:           "cost limit reached but clean end_turn before cancel succeeds with limitMaxCost",
+			result:         &acp.PromptResult{StopReason: "end_turn", CostLimitReached: true},
+			nativeMaxTurns: 0,
+			wantOut:        outcomeSucceeded,
+			wantLimit:      limitMaxCost,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotOut, gotLimit := classifyOutcome(c.result, c.err, c.nativeMaxTurns, c.providerError)
+			if gotOut != c.wantOut || gotLimit != c.wantLimit {
+				t.Errorf("classifyOutcome() = (%v, %v), want (%v, %v)", gotOut, gotLimit, c.wantOut, c.wantLimit)
+			}
+		})
+	}
+}
+
+func TestCombineUsageNoHandoff(t *testing.T) {
+	primary := &acp.PromptResult{TurnsUsed: 5, Cost: 2.5, ContextUsed: 1000, ContextSize: 200000}
+	got := combineUsage(primary, nil)
+	want := usage{TurnsUsed: 5, Cost: 2.5, ContextUsed: 1000, ContextSize: 200000}
+	if got != want {
+		t.Errorf("combineUsage() = %+v, want %+v", got, want)
+	}
+}
+
+func TestCombineUsageAddsTurnsAndTakesMaxCost(t *testing.T) {
+	primary := &acp.PromptResult{TurnsUsed: 5, Cost: 8.5}
+	handoff := &acp.PromptResult{TurnsUsed: 2, Cost: 8.5} // cumulative — same or higher than primary's
+	got := combineUsage(primary, handoff)
+	if got.TurnsUsed != 7 {
+		t.Errorf("TurnsUsed = %d, want 7 (additive)", got.TurnsUsed)
+	}
+	if got.Cost != 8.5 {
+		t.Errorf("Cost = %v, want 8.5 (max, not sum)", got.Cost)
+	}
+}
+
+func TestCombineUsageHandoffContextOverridesWhenReported(t *testing.T) {
+	primary := &acp.PromptResult{ContextUsed: 1000, ContextSize: 200000}
+	handoff := &acp.PromptResult{ContextUsed: 1200, ContextSize: 200000}
+	got := combineUsage(primary, handoff)
+	if got.ContextUsed != 1200 {
+		t.Errorf("ContextUsed = %d, want 1200 (handoff's snapshot wins)", got.ContextUsed)
+	}
+}
+
+func TestCombineUsageFallsBackToPrimaryWhenHandoffReportsNoContext(t *testing.T) {
+	primary := &acp.PromptResult{ContextUsed: 1000, ContextSize: 200000}
+	handoff := &acp.PromptResult{} // handoff prompt was too small to trigger a usage_update
+	got := combineUsage(primary, handoff)
+	if got.ContextUsed != 1000 || got.ContextSize != 200000 {
+		t.Errorf("expected fallback to primary's snapshot, got %+v", got)
+	}
+}
+
+func TestWriteTerminationLogRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "termination-log")
+	term := terminationBlob{
+		ExitCode:     2,
+		Outcome:      "limitReached",
+		LimitReached: "maxTurns",
+		StopReason:   "max_turn_requests",
+		Usage:        &usage{TurnsUsed: 170, Cost: 8.5},
+	}
+	writeTerminationLog(path, term)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var got terminationBlob
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ExitCode != term.ExitCode || got.Outcome != term.Outcome ||
+		got.LimitReached != term.LimitReached || got.StopReason != term.StopReason {
+		t.Errorf("round trip mismatch: got %+v, want %+v", got, term)
+	}
+	if got.Usage == nil || *got.Usage != *term.Usage {
+		t.Errorf("usage round trip mismatch: got %+v, want %+v", got.Usage, term.Usage)
+	}
+}
+
+func TestWriteTerminationLogHandlesLargeBlob(t *testing.T) {
+	// Proves writeTerminationLog writes intact when between warning threshold and hard limit.
+	path := filepath.Join(t.TempDir(), "termination-log")
+	large := strings.Repeat("x", terminationLogSizeWarning+100)
+	term := terminationBlob{ExitCode: 1, Outcome: "failed", StopReason: large}
+	writeTerminationLog(path, term)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	var got terminationBlob
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.StopReason != large {
+		t.Error("large blob under 4096 was not written intact")
+	}
+}
+
+func TestWriteTerminationLogBoundsOversizedBlob(t *testing.T) {
+	// Proves writeTerminationLog guarantees valid JSON <= 4096 bytes when blob exceeds ceiling.
+	path := filepath.Join(t.TempDir(), "termination-log")
+	oversized := strings.Repeat("x", maxTerminationLogBytes+500)
+	term := terminationBlob{
+		ExitCode:     2,
+		Outcome:      "limitReached",
+		LimitReached: "maxTurns",
+		StopReason:   oversized,
+		Usage:        &usage{TurnsUsed: 170},
+	}
+	writeTerminationLog(path, term)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if len(data) > maxTerminationLogBytes {
+		t.Fatalf("blob size = %d, exceeds max %d", len(data), maxTerminationLogBytes)
+	}
+	var got terminationBlob
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal trimmed blob: %v", err)
+	}
+	if got.ExitCode != 2 || got.Outcome != "limitReached" || got.LimitReached != "maxTurns" {
+		t.Errorf("critical fields lost during trim: got %+v", got)
+	}
+}
+
+func TestWriteTerminationLogTrimsStopReasonOnRuneBoundary(t *testing.T) {
+	// "世" is 3 bytes; a run of them straddles the 200-byte trim point so a
+	// naive byte-slice truncation would leave a partial (invalid) rune,
+	// which json.Marshal would silently replace with U+FFFD.
+	path := filepath.Join(t.TempDir(), "termination-log")
+	term := terminationBlob{
+		ExitCode:   1,
+		Outcome:    "failed",
+		StopReason: strings.Repeat("世", 100) + strings.Repeat("x", maxTerminationLogBytes),
+	}
+	writeTerminationLog(path, term)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !utf8.Valid(data) {
+		t.Fatalf("trimmed termination log is not valid UTF-8: %q", data)
+	}
+	var got terminationBlob
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal trimmed blob: %v", err)
+	}
+	if strings.Contains(got.StopReason, "�") {
+		t.Errorf("StopReason contains the UTF-8 replacement character: %q", got.StopReason)
+	}
+}
+
+func TestTerminationLogPathOverride(t *testing.T) {
+	t.Setenv("HARNESS_TERMINATION_LOG_PATH", "/tmp/custom-termination-log")
+	if got := terminationLogPath(); got != "/tmp/custom-termination-log" {
+		t.Errorf("terminationLogPath() = %q, want override", got)
+	}
+}
+
+func TestTerminationLogPathDefault(t *testing.T) {
+	os.Unsetenv("HARNESS_TERMINATION_LOG_PATH")
+	if got := terminationLogPath(); got != defaultTerminationLogPath {
+		t.Errorf("terminationLogPath() = %q, want %q", got, defaultTerminationLogPath)
+	}
+}
+
+func TestExecuteErrorTerminationBlobIsValidJSON(t *testing.T) {
+	// A raw error string (e.g. a quoted path or a `%` from a format verb)
+	// must not corrupt the termination log's JSON shape (issue #189).
+	err := errors.New(`source repository "https://svn.example/repo" uses SCM kind "subversion"`)
+	blob := executeErrorTerminationBlob(err, 1)
+
+	data, marshalErr := json.Marshal(blob)
+	if marshalErr != nil {
+		t.Fatalf("marshal: %v", marshalErr)
+	}
+	var got terminationBlob
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("termination log is not valid JSON: %v (data: %s)", err, data)
+	}
+	if got.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1", got.ExitCode)
+	}
+	if got.Outcome != outcomeFailed.String() {
+		t.Errorf("Outcome = %q, want %q", got.Outcome, outcomeFailed.String())
+	}
+	if got.StopReason != err.Error() {
+		t.Errorf("StopReason = %q, want %q", got.StopReason, err.Error())
+	}
+}
+
+func TestExecuteErrorTerminationBlobUsesGivenExitCode(t *testing.T) {
+	// exitCode may already be non-zero (e.g. runCmd's RunE set it via a
+	// runStage exit-code contract violation before returning an error) —
+	// the blob must preserve it rather than always assuming 1.
+	blob := executeErrorTerminationBlob(errors.New("boom"), 2)
+	if blob.ExitCode != 2 {
+		t.Errorf("ExitCode = %d, want 2", blob.ExitCode)
+	}
+}
+
+func TestProviderErrorSummary(t *testing.T) {
+	long := strings.Repeat("x", providerErrorSummaryLen+50)
+	retry := "\n\nPlease retry if you think this is a transient or recoverable error."
+	// The shape of #231's line (request ids zeroed): goose renders the AWS
+	// SDK error with Debug formatting, which puts the reason past rune 160.
+	bedrock := `Ran into this error: Server error: Failed to call Bedrock: Unhandled(Unhandled { source: ErrorMetadata { code: Some("UnrecognizedClientException"), message: Some("The security token included in the request is invalid."), extras: Some({"aws_request_id": "00000000-0000-0000-0000-000000000000"}) }, meta: ErrorMetadata { code: Some("UnrecognizedClientException"), message: Some("The security token included in the request is invalid."), extras: Some({"aws_request_id": "00000000-0000-0000-0000-000000000000"}) } }).`
+	cases := []struct{ in, want string }{
+		{"Ran into this error: Server error: Failed to call Bedrock: UnrecognizedClientException\n\nPlease retry if you think this is transient.", "Ran into this error: Server error: Failed to call Bedrock: UnrecognizedClientException"},
+		{bedrock + retry, bedrock},
+		// Narration streamed ahead of the failure, in the same message or an
+		// earlier one (FinalMessage joins them), is not the error.
+		{"Here is the plan:\n1. Update pom.xml\nRan into this error: ThrottlingException." + retry, "Ran into this error: ThrottlingException."},
+		{"Done with the first file.\nRan into this error: 503." + retry, "Ran into this error: 503."},
+		{"Here is the plan:\nConnection reset by peer\n\nPlease resend your message to try again.", "Connection reset by peer"},
+		{"\n\n  The provider refused this request.  \n", "The provider refused this request."},
+		{long, strings.Repeat("x", providerErrorSummaryLen-1) + "…"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := providerErrorSummary(c.in); got != c.want {
+			t.Errorf("providerErrorSummary(%q) = %q, want %q", c.in[:min(len(c.in), 40)], got, c.want)
+		}
+	}
+}
+
+func TestGitWriteAccessErrorNoCredential(t *testing.T) {
+	cred := &git.Credentials{
+		RepoURL: "https://github.com/konveyor/migration-1790082780",
+		Branch:  "migration-1790082780",
+	}
+
+	got := gitWriteAccessError(cred).Error()
+	want := "git write access: no write access to https://github.com/konveyor/migration-1790082780 " +
+		"for branch migration-1790082780: the application has no source credential " +
+		"(attach a Source Control credential with push access to the application in the Hub)"
+	if got != want {
+		t.Errorf("stop reason =\n%q\nwant\n%q", got, want)
+	}
+}
+
+func TestGitWriteAccessErrorCredentialCannotPush(t *testing.T) {
+	cred := &git.Credentials{
+		RepoURL:      "https://github.com/konveyor/migration-1790082780",
+		Branch:       "migration-1790082780",
+		IdentityName: "github-readonly",
+		Username:     "x-access-token",
+		Token:        "s3cret",
+	}
+
+	got := gitWriteAccessError(cred).Error()
+	want := "git write access: no write access to https://github.com/konveyor/migration-1790082780 " +
+		`with credential "github-readonly": the token can read but not push`
+	if got != want {
+		t.Errorf("stop reason =\n%q\nwant\n%q", got, want)
+	}
+	if strings.Contains(got, cred.Token) {
+		t.Error("the stop reason must name the identity, never its secret")
+	}
+}
+
+// The prefix is a contract with the UI (konveyor/tackle2-ui#3616): it has
+// to reach terminationData.stopReason intact, which means surviving
+// runStage's deferred blob writer and the kubelet-size trim inside it.
+func TestGitWriteAccessPrefixReachesTerminationLog(t *testing.T) {
+	cred := &git.Credentials{
+		RepoURL: "https://github.com/konveyor/migration-1790082780",
+		Branch:  "migration-1790082780",
+	}
+	err := gitWriteAccessError(cred)
+
+	// Exactly what runStage's deferred writer does for a setup failure
+	// that returns before any prompt outcome is recorded.
+	term := terminationBlob{ExitCode: 1, Outcome: outcomeFailed.String()}
+	if err != nil && term.StopReason == "" {
+		term.StopReason = err.Error()
+	}
+	path := filepath.Join(t.TempDir(), "termination-log")
+	writeTerminationLog(path, term)
+
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read termination log: %v", readErr)
+	}
+	var got terminationBlob
+	if unmarshalErr := json.Unmarshal(data, &got); unmarshalErr != nil {
+		t.Fatalf("termination log is not valid JSON: %v (data: %s)", unmarshalErr, data)
+	}
+	if got.ExitCode != 1 || got.Outcome != outcomeFailed.String() {
+		t.Errorf("termination blob = %+v, want ExitCode=1, Outcome=%q", got, outcomeFailed.String())
+	}
+	if !strings.HasPrefix(got.StopReason, gitWriteAccessPrefix) {
+		t.Errorf("stopReason = %q, want it to start with %q", got.StopReason, gitWriteAccessPrefix)
+	}
+	if got.StopReason != err.Error() {
+		t.Errorf("stopReason = %q, want the pre-flight error preserved: %q", got.StopReason, err.Error())
+	}
+}
+
+func TestGitWriteAccessPrefixIsVerbatim(t *testing.T) {
+	// The UI keys off this literal; a reword silently breaks it.
+	if gitWriteAccessPrefix != "git write access:" {
+		t.Errorf("gitWriteAccessPrefix = %q, want %q", gitWriteAccessPrefix, "git write access:")
+	}
+}

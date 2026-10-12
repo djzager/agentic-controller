@@ -21,6 +21,22 @@ const (
 	// ConditionTypeReady indicates whether the resource is ready.
 	ConditionTypeReady = "Ready"
 
+	// ConditionTypeGatewayConfigured indicates whether an Agent declares at
+	// least one gateway. It is deliberately distinct from Ready: an Agent
+	// with no gateways is a valid, Ready template (a curated default can ship
+	// without knowing a customer's Gateway name), but it is not runnable until
+	// an AgentRun names a gateway. This condition lets the UI surface that
+	// not-runnable state without parsing the Ready message.
+	ConditionTypeGatewayConfigured = "GatewayConfigured"
+
+	// ConditionTypeResolvable indicates whether a SkillCard's image ref points
+	// at an artifact that actually exists in its registry. It is deliberately
+	// distinct from Ready: Ready reports that the spec was accepted and how the
+	// skill will be delivered, while Resolvable is a best-effort registry check
+	// that can be Unknown (e.g. a private image the controller cannot
+	// authenticate to) without dragging the card out of Ready.
+	ConditionTypeResolvable = "Resolvable"
+
 	// labelManagedBy is the standard Kubernetes label key for managed-by.
 	labelManagedBy = "app.kubernetes.io/managed-by"
 
@@ -32,6 +48,9 @@ const (
 
 	// labelAgent identifies resources belonging to an Agent.
 	labelAgent = "konveyor.io/agent"
+
+	// labelGateway identifies resources belonging to a Gateway.
+	labelGateway = "konveyor.io/gateway"
 
 	// labelAgentWorkflowRun identifies resources belonging to an AgentWorkflowRun.
 	labelAgentWorkflowRun = "konveyor.io/agentworkflowrun"

@@ -8,7 +8,7 @@ set -e
 echo "=== konveyor agent-base ==="
 echo "Workspace: $(pwd)"
 echo "Skills:    $(ls /opt/skills/ 2>/dev/null || echo 'none')"
-echo "Params:    $(env | grep KONVEYOR_PARAM_ | sort || echo 'none')"
+echo "Params:    $(cat /run/konveyor/params.json 2>/dev/null || echo 'none')"
 echo "Gateway:   $(env | grep KONVEYOR_LLM_ | cut -d= -f1 | sort || echo 'none')"
 echo ""
 
@@ -38,5 +38,6 @@ sleep "${ACP_DELAY}"
 echo "ACP: listening on :4000"
 python3 -m http.server 4000 &
 server=$!
-trap 'kill "${server}" 2>/dev/null' TERM INT
+trap 'kill "${server}" 2>/dev/null || true' TERM INT
 wait "${server}"
+exit 0

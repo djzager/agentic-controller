@@ -1,9 +1,10 @@
 // Package prompt assembles the prompt sent to the agent for a stage.
 //
 // The prompt is layered: environment rules the harness imposes, then the
-// Agent's standing prompt, then the workflow guide, then the skill, then the
-// stage task. Later layers are more specific; the environment rules come first
-// because they constrain everything after them.
+// Agent's standing prompt, then the workflow guide, then the resolved
+// parameter values, then the skill, then the stage task. Later layers are
+// more specific; the environment rules come first because they constrain
+// everything after them.
 package prompt
 
 import (
@@ -47,9 +48,29 @@ type Layers struct {
 	Rules []Rule
 	// WorkflowGuide is the workflow's ambient guide.
 	WorkflowGuide string
+	// Parameters is the pre-rendered body of the "## Parameters" section
+	// (workflow and agent values as text, per ADR 0009). Empty when there
+	// are no parameter values to show.
+	Parameters string
 	// StageTask is the task for this stage.
 	StageTask string
+	// AskUser: the session mounts the harness's ask_user tool, so the
+	// guidelines tell the model to use it (and not to ask in prose).
+	AskUser bool
 }
+
+// askUserGuideline is appended to the working guidelines when the ask_user
+// tool is mounted. It has to pre-empt the model's habit of asking in prose:
+// nothing reads an assistant message until the run is over, and a turn that
+// ends on a question is a finished run.
+const askUserGuideline = "A human may be watching this run. When you need a decision only a human can make — " +
+	"a missing prerequisite, an ambiguous requirement, a choice between approaches, anything destructive — " +
+	"call the `ask_user` tool and wait for its answer. Do not ask questions in prose: nobody reads your " +
+	"messages until the run is over, and ending your turn on a question ends the run. " +
+	"A human may also redirect you mid-turn; if a redirect asks you to pause, check in, " +
+	"report status, or wait, call `ask_user` with your status and the choices you see, and " +
+	"do not continue until it answers. " +
+	"If `ask_user` reports that nobody answered, say what you needed and stop.\n\n"
 
 // Build composes the stage prompt. The harness's environment rules always come
 // first, so a skill cannot be read as overriding them.
@@ -82,8 +103,17 @@ func Build(l Layers) string {
 		b.WriteString("\n\n")
 	}
 
+	if l.Parameters != "" {
+		b.WriteString("## Parameters\n\n")
+		b.WriteString(l.Parameters)
+		b.WriteString("\n\n")
+	}
+
 	b.WriteString("## Working Guidelines\n\n")
 	b.WriteString("Commit your changes to git with a descriptive message when your work is complete.\n\n")
+	if l.AskUser {
+		b.WriteString(askUserGuideline)
+	}
 
 	if l.StageTask != "" {
 		b.WriteString("## Stage Task\n\n")

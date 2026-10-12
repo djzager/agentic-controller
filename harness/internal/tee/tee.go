@@ -23,7 +23,10 @@
 //   - a session/request_permission ask on the run connection is offered
 //     to attached viewers under a harness-allocated "kperm-<n>" string id
 //     (disjoint from the pipe's verbatim numeric ids); the viewer's
-//     answer is intercepted and relayed to goose
+//     answer is intercepted and relayed to goose. An elicitation/create
+//     ask — the agent's own question, e.g. its ask_user tool — travels
+//     the same road under "kask-<n>", and a pending ask is replayed to a
+//     viewer that attaches while it waits.
 //   - redirection: a viewer frame naming the RUN session is routed onto
 //     the run connection instead of the viewer's private pipe —
 //     `_goose/unstable/session/steer` (inject guidance into the active
@@ -80,6 +83,32 @@ const (
 	// is a complete catch-up in practice.
 	replayCap = 32
 
+	// replayKeyPlan / replayKeyOutcome name the keyed frames: the plan
+	// ladder and the notice saying how the stage ended. Each carries the
+	// whole of its state, so only the latest is worth keeping — and it is
+	// worth keeping whatever else arrives afterwards.
+	replayKeyPlan    = "plan"
+	replayKeyOutcome = "outcome"
+
+	// replayKeyPush / replayKeyPushUpdate key the auto-commit watcher's
+	// git pushes. A push is two frames — the tool call and its result —
+	// and a run makes dozens, which is the single biggest source of
+	// replay traffic. Only the most recent push tells a late viewer
+	// anything ("it is still pushing, and the last one worked"), so the
+	// two frames get a slot each and every earlier push is superseded.
+	//
+	// Two keys rather than one because the pair must survive together:
+	// the console looks up a tool_call_update by toolCallId and drops it
+	// when the opening tool_call is not in its list, so keeping only the
+	// result would make the push vanish from the catch-up entirely.
+	replayKeyPush       = "push"
+	replayKeyPushUpdate = "push/update"
+
+	// harnessPushPrefix marks the toolCallIds the harness mints for its
+	// own git pushes (harness-push-<n>), as opposed to the agent's tool
+	// calls, which pass through the tee untouched and are never replayed.
+	harnessPushPrefix = "harness-push-"
+
 	// relayTimeout bounds a viewer request relayed onto the run
 	// connection (steer). goose answers these immediately — steer only
 	// queues a message — so a slow answer means a broken run connection.
@@ -134,7 +163,10 @@ type Server struct {
 	mu      sync.Mutex
 	viewers map[*viewer]struct{}
 	perms   map[string]chan json.RawMessage
-	stopped bool
+	// pendingAsks keeps each outstanding ask's frame so a viewer attaching
+	// mid-ask (typical for a question that waits minutes) still sees it.
+	pendingAsks map[string][]byte
+	stopped     bool
 
 	// done is closed by Stop so anything parked on a viewer answer
 	// (ForwardPermission) fails closed immediately instead of waiting
@@ -161,6 +193,12 @@ type Server struct {
 	runSessionID string
 	runActive    atomic.Bool
 
+	// replayKeys parallels replay: a non-empty key marks a frame that
+	// supersedes any earlier frame with the same key (the plan ladder,
+	// re-emitted as the turn progresses, would otherwise fill the ring
+	// and evict the push and outcome frames a late viewer needs), and
+	// that survives the ring's trim until something supersedes it.
+	replayKeys []string
 	// replay holds the harness's own emitted status frames for viewers
 	// that attach later. Guarded by mu.
 	replay [][]byte
@@ -180,10 +218,11 @@ func New(cfg Config) *Server {
 		// No credential in the URL: the key rides the X-Secret-Key
 		// header on dial, so an error that echoes the URL cannot leak it
 		// into container logs.
-		upstream: fmt.Sprintf("ws://%s/acp", cfg.UpstreamAddr),
-		viewers:  make(map[*viewer]struct{}),
-		perms:    make(map[string]chan json.RawMessage),
-		done:     make(chan struct{}),
+		upstream:    fmt.Sprintf("ws://%s/acp", cfg.UpstreamAddr),
+		viewers:     make(map[*viewer]struct{}),
+		perms:       make(map[string]chan json.RawMessage),
+		pendingAsks: make(map[string][]byte),
+		done:        make(chan struct{}),
 	}
 }
 
@@ -317,20 +356,59 @@ func (s *Server) SetRunActive(active bool) {
 // prep, watcher/final git pushes, stage outcome. The frame also enters
 // the replay ring so late viewers catch up.
 func (s *Server) EmitRunUpdate(update any) {
-	s.emitRunFrame("session/update", update)
+	s.emitRunFrame("session/update", update, replayKeyFor(update))
+}
+
+// replayKeyFor returns the replay-ring key for a harness update:
+// replayKeyPlan for a plan ladder (each carries the whole ladder, so only
+// the latest is worth replaying), replayKeyPush / replayKeyPushUpdate for
+// the harness's own git pushes (only the most recent one is news), empty
+// for everything else.
+func replayKeyFor(update any) string {
+	m, ok := update.(map[string]any)
+	if !ok {
+		return ""
+	}
+	kind, _ := m["sessionUpdate"].(string)
+	switch kind {
+	case replayKeyPlan:
+		return kind
+	case "tool_call", "tool_call_update":
+		id, _ := m["toolCallId"].(string)
+		if !strings.HasPrefix(id, harnessPushPrefix) {
+			return ""
+		}
+		if kind == "tool_call" {
+			return replayKeyPush
+		}
+		return replayKeyPushUpdate
+	}
+	return ""
 }
 
 // EmitRunNotice broadcasts a stage-level status line using goose's own
 // custom status_message vocabulary (`_goose/unstable/session/update`), so
 // a client that renders goose notices renders harness notices too.
 func (s *Server) EmitRunNotice(message string) {
-	s.emitRunFrame(gooseUpdateMethod, map[string]any{
-		"sessionUpdate": "status_message",
-		"status":        map[string]any{"type": "notice", "message": message},
-	})
+	s.emitRunFrame(gooseUpdateMethod, noticeUpdate(message), "")
 }
 
-func (s *Server) emitRunFrame(method string, update any) {
+// EmitRunOutcome broadcasts the notice that says how the stage ended.
+// Same frame as EmitRunNotice, but keyed: how the run finished is the one
+// thing a late viewer attaches to learn, and today it reaches the replay
+// ring only because nothing happens to be emitted after it.
+func (s *Server) EmitRunOutcome(message string) {
+	s.emitRunFrame(gooseUpdateMethod, noticeUpdate(message), replayKeyOutcome)
+}
+
+func noticeUpdate(message string) map[string]any {
+	return map[string]any{
+		"sessionUpdate": "status_message",
+		"status":        map[string]any{"type": "notice", "message": message},
+	}
+}
+
+func (s *Server) emitRunFrame(method string, update any, replayKey string) {
 	_, sessionID := s.run()
 	if sessionID == "" {
 		return
@@ -346,27 +424,70 @@ func (s *Server) emitRunFrame(method string, update any) {
 	}
 
 	s.mu.Lock()
-	s.replay = append(s.replay, frame)
-	if len(s.replay) > replayCap {
-		s.replay = s.replay[len(s.replay)-replayCap:]
+	if replayKey != "" {
+		for i, k := range s.replayKeys {
+			if k == replayKey {
+				s.replay = append(s.replay[:i], s.replay[i+1:]...)
+				s.replayKeys = append(s.replayKeys[:i], s.replayKeys[i+1:]...)
+				break
+			}
+		}
 	}
+	s.replay = append(s.replay, frame)
+	s.replayKeys = append(s.replayKeys, replayKey)
+	s.trimReplayLocked()
 	s.mu.Unlock()
 
 	s.broadcast(frame)
 }
 
+// trimReplayLocked brings the ring back to replayCap by evicting the
+// oldest *unkeyed* frame each time, so state outlives history: keyed
+// frames are one per key and each is the only surviving copy of what it
+// describes, while unkeyed frames are a stream whose older entries a late
+// viewer cannot use anyway. Only when the ring is all keyed — which needs
+// more distinct keys than exist — does the oldest keyed frame go.
+// Callers hold s.mu.
+func (s *Server) trimReplayLocked() {
+	for len(s.replay) > replayCap {
+		drop := 0
+		for i, key := range s.replayKeys {
+			if key == "" {
+				drop = i
+				break
+			}
+		}
+		s.replay = append(s.replay[:drop], s.replay[drop+1:]...)
+		s.replayKeys = append(s.replayKeys[:drop], s.replayKeys[drop+1:]...)
+	}
+}
+
 // ForwardPermission implements acp.PermissionForwarder: broadcast the ask
 // to every attached viewer under a kperm-<n> id, first answer wins.
 func (s *Server) ForwardPermission(params json.RawMessage) (json.RawMessage, acp.PermissionForwardOutcome) {
-	id := fmt.Sprintf("kperm-%d", s.permSeq.Add(1))
+	return s.forwardAsk("kperm", "session/request_permission", params)
+}
+
+// ForwardElicitation implements acp.PermissionForwarder for the agent's
+// questions (elicitation/create): same relay under a kask-<n> id. The
+// answer is the viewer's {action, content} object, relayed verbatim.
+func (s *Server) ForwardElicitation(params json.RawMessage) (json.RawMessage, acp.PermissionForwardOutcome) {
+	return s.forwardAsk("kask", "elicitation/create", params)
+}
+
+// forwardAsk offers an agent→client request to every attached viewer under
+// a harness-allocated string id; first answer wins; a viewer attaching while
+// the ask is pending receives it on attach.
+func (s *Server) forwardAsk(prefix, method string, params json.RawMessage) (json.RawMessage, acp.PermissionForwardOutcome) {
+	id := fmt.Sprintf("%s-%d", prefix, s.permSeq.Add(1))
 	frame, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
-		"method":  "session/request_permission",
+		"method":  method,
 		"params":  params,
 	})
 	if err != nil {
-		logging.Warn("tee: marshal permission forward: %v", err)
+		logging.Warn("tee: marshal %s forward: %v", method, err)
 		return nil, acp.ForwardNoViewers
 	}
 
@@ -385,6 +506,7 @@ func (s *Server) ForwardPermission(params json.RawMessage) (json.RawMessage, acp
 		return nil, acp.ForwardNoViewers
 	}
 	s.perms[id] = ch
+	s.pendingAsks[id] = frame
 	s.mu.Unlock()
 
 	targets := s.snapshotViewers()
@@ -396,10 +518,11 @@ func (s *Server) ForwardPermission(params json.RawMessage) (json.RawMessage, acp
 	defer func() {
 		s.mu.Lock()
 		delete(s.perms, id)
+		delete(s.pendingAsks, id)
 		s.mu.Unlock()
 	}()
 
-	logging.Info("tee: permission ask %s offered to %d viewer(s)", id, n)
+	logging.Info("tee: %s %s offered to %d viewer(s)", method, id, n)
 	// Explicit timer, not time.After: an answered ask must release its
 	// timer immediately rather than pinning it for the full window.
 	timer := time.NewTimer(s.cfg.HITLTimeout)
@@ -408,11 +531,54 @@ func (s *Server) ForwardPermission(params json.RawMessage) (json.RawMessage, acp
 	case result := <-ch:
 		return result, acp.ForwardAnswered
 	case <-s.done:
+		// Shutdown races viewer teardown, but a resolution frame that
+		// reaches a still-attached viewer closes a card it would otherwise
+		// be left staring at.
+		s.emitAskResolution(id, cancelResult(prefix))
 		return nil, acp.ForwardNoViewers
 	case <-timer.C:
 		s.responsive.Store(false)
+		// Close the card everywhere: it has been offered to viewers, and
+		// without this it stays in the "answer/decline" state forever even
+		// though the ask is over.
+		s.emitAskResolution(id, cancelResult(prefix))
 		return nil, acp.ForwardTimeout
 	}
+}
+
+// cancelResult is the JSON-RPC result body a timed-out or shutdown ask
+// resolves to, in the shape the ask's own method uses: elicitation carries
+// {"action":"cancel"} (what the run connection also hands goose), a
+// permission request carries a cancelled outcome.
+func cancelResult(prefix string) json.RawMessage {
+	if prefix == "kask" {
+		return json.RawMessage(`{"action":"cancel"}`)
+	}
+	return json.RawMessage(`{"outcome":{"outcome":"cancelled"}}`)
+}
+
+// emitAskResolution tells every attached viewer that the ask under id is no
+// longer open, so a question/permission card is closed instead of stranded
+// in its answer/decline state. It is a JSON-RPC response keyed by the same
+// kask-<n>/kperm-<n> id the viewers received the request under: an answered
+// ask carries the answering viewer's own result (so other viewers see what
+// was chosen); a timed-out, cancelled, or shutdown ask carries the
+// method's cancel body. Broadcast-only — it never travels the run
+// connection, so the tee's "never affect the run" invariant holds.
+func (s *Server) emitAskResolution(id string, result json.RawMessage) {
+	if len(result) == 0 {
+		result = json.RawMessage("null")
+	}
+	frame, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"result":  result,
+	})
+	if err != nil {
+		logging.Warn("tee: marshal ask resolution %s: %v", id, err)
+		return
+	}
+	s.broadcast(frame)
 }
 
 // ---------------------------------------------------------------- viewers
@@ -526,6 +692,11 @@ func (s *Server) serveViewer(client *websocket.Conn) {
 	// via session/load).
 	s.mu.Lock()
 	backlog := append([][]byte(nil), s.replay...)
+	// Outstanding asks go after the status frames: a viewer arriving in
+	// the middle of an unanswered question is exactly who should see it.
+	for _, f := range s.pendingAsks {
+		backlog = append(backlog, f)
+	}
 	s.mu.Unlock()
 	for _, f := range backlog {
 		v.enqueue(outFrame{websocket.TextMessage, f})
@@ -634,15 +805,15 @@ func (s *Server) serveViewer(client *websocket.Conn) {
 	}()
 
 	// Client reader: client → goose, verbatim — except frames that belong
-	// to the run connection, not this pipe: answers to kperm-* asks, and
-	// steer/cancel/prompt frames naming the run session.
+	// to the run connection, not this pipe: answers to kperm-*/kask-* asks,
+	// and steer/cancel/prompt frames naming the run session.
 	for {
 		mt, data, err := client.ReadMessage()
 		if err != nil {
 			return
 		}
-		if id, result, ok := kpermAnswer(data); ok {
-			s.resolvePermission(id, result)
+		if id, result, ok := harnessAskAnswer(data); ok {
+			s.resolveAsk(id, result)
 			continue
 		}
 		if s.interceptRunFrame(v, data) {
@@ -813,11 +984,11 @@ func (s *Server) broadcast(frame []byte) {
 	}
 }
 
-// kpermAnswer reports whether the frame is a JSON-RPC *response* to a
-// harness-allocated kperm-* permission ask, and extracts its result.
-// Error responses are not answers — the ask stays pending for another
-// viewer or the timeout.
-func kpermAnswer(frame []byte) (string, json.RawMessage, bool) {
+// harnessAskAnswer reports whether the frame is a JSON-RPC *response* to a
+// harness-allocated ask (kperm-* permission, kask-* elicitation), and
+// extracts its result. Error responses are not answers — the ask stays
+// pending for another viewer or the timeout.
+func harnessAskAnswer(frame []byte) (string, json.RawMessage, bool) {
 	var probe struct {
 		ID     json.RawMessage `json:"id"`
 		Method string          `json:"method"`
@@ -833,19 +1004,19 @@ func kpermAnswer(frame []byte) (string, json.RawMessage, bool) {
 	if err := json.Unmarshal(probe.ID, &id); err != nil {
 		return "", nil, false
 	}
-	if !strings.HasPrefix(id, "kperm-") {
+	if !strings.HasPrefix(id, "kperm-") && !strings.HasPrefix(id, "kask-") {
 		return "", nil, false
 	}
 	if len(probe.Result) == 0 {
-		logging.Warn("tee: viewer errored permission ask %s — leaving it pending", id)
+		logging.Warn("tee: viewer errored ask %s — leaving it pending", id)
 		return id, nil, true // consumed (never forwarded upstream), but not resolved
 	}
 	return id, probe.Result, true
 }
 
-func (s *Server) resolvePermission(id string, result json.RawMessage) {
-	// Any kperm frame — even a late or error answer — proves a human is
-	// at the controls; resume forwarding asks.
+func (s *Server) resolveAsk(id string, result json.RawMessage) {
+	// Any kperm/kask frame — even a late or error answer — proves a human
+	// is at the controls; resume forwarding asks.
 	s.responsive.Store(true)
 	if result == nil {
 		return
@@ -854,6 +1025,13 @@ func (s *Server) resolvePermission(id string, result json.RawMessage) {
 	ch, ok := s.perms[id]
 	if ok {
 		delete(s.perms, id)
+		// Drop the replay frame in the same critical section that commits
+		// the answer: forwardAsk's deferred cleanup only runs after the
+		// parked goroutine wakes, and a viewer snapshotting the backlog in
+		// that gap would be offered a question whose answer channel is
+		// already gone — its reply would vanish as "late/duplicate". The
+		// deferred cleanup still covers the timeout and shutdown paths.
+		delete(s.pendingAsks, id)
 	}
 	s.mu.Unlock()
 	if !ok {
@@ -861,6 +1039,10 @@ func (s *Server) resolvePermission(id string, result json.RawMessage) {
 		return
 	}
 	ch <- result // cap 1; sole sender after map removal
+	// Close the card for every other viewer that received the same ask —
+	// the one that answered already knows, but the rest are still holding
+	// an open question/permission prompt.
+	s.emitAskResolution(id, result)
 }
 
 func recoverWarn(what string) {

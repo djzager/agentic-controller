@@ -8,12 +8,14 @@
 #   CONTAINER_TOOL          docker or podman (default: auto-detect)
 #   IMG                     Controller image (default: quay.io/konveyor/agentic-controller:e2e)
 #   CONTROLLER_AGENT_IMG    Agent image (default: quay.io/konveyor/agentic-controller-agent:e2e)
+#   E2E_AGENT_STUB_IMG      Workflow-test image (default: quay.io/konveyor/agentic-controller-agent:e2e-stub)
 
 set -euo pipefail
 
 KIND_CLUSTER="${KIND_CLUSTER:-agentic-controller-e2e}"
 IMG="${IMG:-quay.io/konveyor/agentic-controller:e2e}"
 CONTROLLER_AGENT_IMG="${CONTROLLER_AGENT_IMG:-quay.io/konveyor/agentic-controller-agent:e2e}"
+E2E_AGENT_STUB_IMG="${E2E_AGENT_STUB_IMG:-quay.io/konveyor/agentic-controller-agent:e2e-stub}"
 
 # Auto-detect container runtime.
 if [ -z "${CONTAINER_TOOL:-}" ]; then
@@ -43,6 +45,13 @@ make controller-agent-build CONTROLLER_AGENT_IMG="${CONTROLLER_AGENT_IMG}" CONTA
 # Also tag as :latest for the Gateway verification Job default.
 ${CONTAINER_TOOL} tag "${CONTROLLER_AGENT_IMG}" "quay.io/konveyor/agentic-controller-agent:latest"
 
+echo "Building E2E agent stub image: ${E2E_AGENT_STUB_IMG}"
+${CONTAINER_TOOL} build \
+    --build-arg BASE_IMAGE="${CONTROLLER_AGENT_IMG}" \
+    -t "${E2E_AGENT_STUB_IMG}" \
+    -f test/e2e/agent-stub/Containerfile \
+    test/e2e/agent-stub/
+
 echo ""
 echo "=== Loading images into Kind cluster '${KIND_CLUSTER}' ==="
 if [ "${CONTAINER_TOOL}" = "podman" ]; then
@@ -55,14 +64,15 @@ if [ "${CONTAINER_TOOL}" = "podman" ]; then
     ${CONTAINER_TOOL} save "${IMG}" -o "${TMPDIR}/controller.tar"
     kind load image-archive "${TMPDIR}/controller.tar" --name "${KIND_CLUSTER}"
 
-    echo "Saving ${CONTROLLER_AGENT_IMG} (+ :latest) to tarball..."
-    ${CONTAINER_TOOL} save "${CONTROLLER_AGENT_IMG}" "quay.io/konveyor/agentic-controller-agent:latest" -o "${TMPDIR}/agent.tar"
+    echo "Saving agent images to tarball..."
+    ${CONTAINER_TOOL} save "${CONTROLLER_AGENT_IMG}" "quay.io/konveyor/agentic-controller-agent:latest" "${E2E_AGENT_STUB_IMG}" -o "${TMPDIR}/agent.tar"
     kind load image-archive "${TMPDIR}/agent.tar" --name "${KIND_CLUSTER}"
 else
     kind load docker-image "${IMG}" --name "${KIND_CLUSTER}"
     kind load docker-image "${CONTROLLER_AGENT_IMG}" --name "${KIND_CLUSTER}"
     ${CONTAINER_TOOL} tag "${CONTROLLER_AGENT_IMG}" "quay.io/konveyor/agentic-controller-agent:latest"
     kind load docker-image "quay.io/konveyor/agentic-controller-agent:latest" --name "${KIND_CLUSTER}"
+    kind load docker-image "${E2E_AGENT_STUB_IMG}" --name "${KIND_CLUSTER}"
 fi
 
 echo ""
@@ -78,7 +88,7 @@ make skill-build SKILL_IMAGE="${SKILL_BUNDLE_IMG}" CONTAINER_TOOL="${CONTAINER_T
 # Build a FROM-scratch OCI image for each skill and load into Kind.
 # skillctl builds to its own OCI store; we need container images for Kind.
 # Use the skill content directly in a simple container image.
-for dir in skills/examples/*/; do
+for dir in catalog/examples/*/; do
     name=$(basename "${dir}")
     skill_img="quay.io/konveyor/skills:${name}"
     echo "Building skill image: ${skill_img}"
@@ -99,7 +109,7 @@ if [ "${CONTAINER_TOOL}" = "podman" ]; then
     echo "Saving ${SKILL_BUNDLE_IMG} to tarball..."
     ${CONTAINER_TOOL} save "${SKILL_BUNDLE_IMG}" -o "${SKILL_TMP}/bundle.tar"
     kind load image-archive "${SKILL_TMP}/bundle.tar" --name "${KIND_CLUSTER}"
-    for dir in skills/examples/*/; do
+    for dir in catalog/examples/*/; do
         name=$(basename "${dir}")
         skill_img="quay.io/konveyor/skills:${name}"
         echo "Saving ${skill_img} to tarball..."
@@ -109,7 +119,7 @@ if [ "${CONTAINER_TOOL}" = "podman" ]; then
     rm -rf "${SKILL_TMP}"
 else
     kind load docker-image "${SKILL_BUNDLE_IMG}" --name "${KIND_CLUSTER}"
-    for dir in skills/examples/*/; do
+    for dir in catalog/examples/*/; do
         name=$(basename "${dir}")
         kind load docker-image "quay.io/konveyor/skills:${name}" --name "${KIND_CLUSTER}"
     done
@@ -134,8 +144,11 @@ kubectl rollout status deployment/agentic-controller-controller-manager \
     --timeout=120s
 
 echo ""
-echo "=== Deploying sample resources ==="
-kubectl apply -k config/samples/
+echo "=== Deploying default content ==="
+# The SkillCards/SkillCollections (and the migration Agents + workflow) live in
+# config/defaults/, not config/samples/ (which now holds only Gateways that need
+# real credentials). Apply the defaults so the assertions below see the catalog.
+kubectl apply -k config/defaults/
 
 echo ""
 echo "=== Controller deployed ==="

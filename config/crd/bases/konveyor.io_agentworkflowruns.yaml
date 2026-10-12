@@ -268,6 +268,102 @@ spec:
                       x-kubernetes-map-type: atomic
                   type: object
                 type: array
+              fileMounts:
+                description: |-
+                  FileMounts attaches Secrets or ConfigMaps as read-only files across
+                  all stages. Passed through to each stage's AgentRun unchanged and
+                  validated there against the controller-managed mounts.
+                items:
+                  description: |-
+                    FileMount attaches a Secret or ConfigMap into the Sandbox container as
+                    files on disk, mounted read-only. It is the file-shaped sibling of
+                    spec.envFrom: use it for config or credentials a skill or tool reads
+                    from a path (e.g. a config file, a service-account JSON) rather than
+                    from an environment variable. The controller passes the source through
+                    as a Kubernetes primitive. Before creating the Sandbox it checks source
+                    existence and projected keys, without interpreting their values.
+
+                    Exactly one of SecretName or ConfigMapName must be set. MountPath is
+                    rejected at run creation if it lands on, under, or above a
+                    controller-managed mount (/opt/skills, /opt/skills-src, /run/konveyor,
+                    /workspace, /tmp), the Kubernetes service-account token mount, or another
+                    user mount. Invalid paths and missing items keys or subPaths fail the run
+                    with InvalidFileMounts. Missing sources are retried with Succeeded=Unknown
+                    and reason FileMountSourceNotFound, allowing apply-order races to recover.
+                  properties:
+                    configMapName:
+                      description: |-
+                        ConfigMapName names a ConfigMap in the same namespace to mount.
+                        Mutually exclusive with SecretName.
+                      minLength: 1
+                      type: string
+                    items:
+                      description: |-
+                        Items selects and optionally renames individual keys from the
+                        source object. When empty, every key is projected
+                        under MountPath using the key as the filename.
+                      items:
+                        description: Maps a string key to a path within a volume.
+                        properties:
+                          key:
+                            description: key is the key to project.
+                            type: string
+                          mode:
+                            description: |-
+                              mode is Optional: mode bits used to set permissions on this file.
+                              Must be an octal value between 0000 and 0777 or a decimal value between 0 and 511.
+                              YAML accepts both octal and decimal values, JSON requires decimal values for mode bits.
+                              If not specified, the volume defaultMode will be used.
+                              This might be in conflict with other options that affect the file
+                              mode, like fsGroup, and the result can be other mode bits set.
+                            format: int32
+                            type: integer
+                          path:
+                            description: |-
+                              path is the relative path of the file to map the key to.
+                              May not be an absolute path.
+                              May not contain the path element '..'.
+                              May not start with the string '..'.
+                            type: string
+                        required:
+                        - key
+                        - path
+                        type: object
+                      type: array
+                    mountPath:
+                      description: |-
+                        MountPath is the absolute path in the Sandbox container where the
+                        content is mounted. When SubPath is empty the whole object is
+                        mounted as a directory here (one file per key); when SubPath is set
+                        MountPath is the file path a single key lands at. Must not collide
+                        with a reserved mount or overlap another mount after path cleaning.
+                        The cleaned path is used in the Sandbox.
+                      minLength: 1
+                      type: string
+                    secretName:
+                      description: |-
+                        SecretName names a Secret in the same namespace to mount. Mutually
+                        exclusive with ConfigMapName.
+                      minLength: 1
+                      type: string
+                    subPath:
+                      description: |-
+                        SubPath mounts a single key from the source object as a file at
+                        MountPath instead of mounting the whole object as a directory. Its
+                        value is a path in the projected volume: a key name by default, or
+                        an Items path when keys are selected or renamed. Projected directories
+                        may also be mounted.
+                      type: string
+                  required:
+                  - mountPath
+                  type: object
+                  x-kubernetes-validations:
+                  - message: exactly one of secretName or configMapName must be set
+                    rule: has(self.secretName) != has(self.configMapName)
+                type: array
+                x-kubernetes-list-map-keys:
+                - mountPath
+                x-kubernetes-list-type: map
               gateway:
                 description: |-
                   Gateway selects the Gateway (provider/model combination) for all
@@ -278,8 +374,7 @@ spec:
                 description: Params supplies values for Agent parameters across all
                   stages.
                 items:
-                  description: AgentRunParam supplies a value for a declared Agent
-                    parameter.
+                  description: ParamValue supplies a value for a declared Agent parameter.
                   properties:
                     name:
                       description: Name is the parameter name, matching an Agent param
@@ -297,6 +392,18 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              ttlSecondsAfterFinished:
+                description: |-
+                  TTLSecondsAfterFinished limits the lifetime of an AgentWorkflowRun that
+                  has reached a terminal phase (Succeeded or Failed), mirroring Job's
+                  ttlSecondsAfterFinished. When set, the controller deletes the run this
+                  many seconds after it finished — cascading to the child AgentRuns it
+                  owns via owner references — so terminal runs do not accumulate. Zero
+                  deletes as soon as the run finishes. When unset, the run is kept until
+                  deleted manually, unless the controller is configured with a default TTL.
+                format: int32
+                minimum: 0
+                type: integer
               workflowRef:
                 description: WorkflowRef is the name of the AgentWorkflow CR to execute.
                 minLength: 1
@@ -379,11 +486,71 @@ spec:
               currentStage:
                 description: CurrentStage is the name of the currently executing stage.
                 type: string
+              guide:
+                description: |-
+                  Guide snapshots the AgentWorkflow guide at initialization time, so
+                  mid-run edits do not change it for stages still to run (#87).
+                type: string
               observedGeneration:
                 description: ObservedGeneration is the most recent generation observed
                   by the controller.
                 format: int64
                 type: integer
+              params:
+                description: |-
+                  Params snapshots the AgentWorkflow's workflow-level parameter
+                  declarations at initialization time, so coercion of the run's
+                  supplied values stays stable across a mid-run workflow edit (#87).
+                items:
+                  description: |-
+                    Param declares a typed parameter that an Agent or AgentWorkflow
+                    accepts. A run (AgentRun / AgentWorkflowRun) supplies values via
+                    ParamValue. Resolved values are delivered to the Sandbox in
+                    /run/konveyor/params.json (see ADR 0009) and may be referenced in
+                    prompt text with $(agent.<name>) / $(workflow.<name>).
+                  properties:
+                    default:
+                      description: Default is the default value if not supplied by
+                        a run.
+                      type: string
+                    description:
+                      description: Description explains the purpose of the parameter.
+                      type: string
+                    name:
+                      description: |-
+                        Name is the parameter name. Referenced in prompt text as
+                        $(agent.<name>) or $(workflow.<name>) and delivered in
+                        params.json under the corresponding section.
+                      minLength: 1
+                      pattern: ^[a-zA-Z_][a-zA-Z0-9_]*$
+                      type: string
+                    required:
+                      description: |-
+                        Required indicates whether the parameter must be supplied.
+                        A parameter with a default is never required.
+                      type: boolean
+                    type:
+                      default: string
+                      description: |-
+                        Type is the parameter type. Controls JSON coercion in
+                        params.json: number as a JSON number, boolean as a JSON boolean,
+                        string as a JSON string.
+                      enum:
+                      - string
+                      - number
+                      - boolean
+                      type: string
+                  required:
+                  - name
+                  type: object
+                  x-kubernetes-validations:
+                  - message: a parameter with a default value cannot be required
+                    rule: '!(has(self.required) && self.required && has(self.default)
+                      && size(self.default) > 0)'
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
               phase:
                 default: Pending
                 description: Phase is the current phase of the overall workflow run.
@@ -394,15 +561,60 @@ spec:
                 - Failed
                 type: string
               stages:
-                description: Stages tracks the status of each stage.
+                description: |-
+                  Stages tracks the status of each stage, and snapshots each stage's
+                  definition at initialization time (#87).
                 items:
                   description: |-
                     AgentWorkflowRunStageStatus tracks the status of a single stage within
                     a workflow run.
                   properties:
+                    agentRef:
+                      description: AgentRef is the snapshotted Agent name for this
+                        stage.
+                      type: string
                     agentRunName:
                       description: AgentRunName is the name of the AgentRun CR created
                         for this stage.
+                      type: string
+                    execution:
+                      description: Execution is the snapshotted stage execution override.
+                      properties:
+                        askUser:
+                          description: |-
+                            AskUser gives the agent the ask_user tool: it may stop mid-turn and
+                            put a question to the viewers attached to the run (ADR 0017). An
+                            unanswered question fails the run — the harness never answers for
+                            the human — so set this only for a run somebody will be watching.
+                            Defaults to false: a run nobody opted into supervising cannot be
+                            failed by a question nobody saw.
+                          type: boolean
+                        maxCost:
+                          description: |-
+                            MaxCost is the maximum cumulative cost in USD before wind-down,
+                            as a decimal string (e.g. "10.00"). USD only: the enforcement
+                            threshold must match the currency of reported usage, which is USD
+                            across the supported runtimes. Reported cost may carry an ISO 4217
+                            currency; this threshold does not.
+                          pattern: ^[0-9]+(\.[0-9]{1,2})?$
+                          type: string
+                        maxTurns:
+                          description: |-
+                            MaxTurns is the maximum number of turns before wind-down. The unit
+                            is runtime-defined (e.g. Goose counts turns without user input).
+                          minimum: 1
+                          type: integer
+                        mode:
+                          description: Mode is the supervision policy for tool calls.
+                            Defaults to auto.
+                          enum:
+                          - auto
+                          - approve
+                          type: string
+                      type: object
+                    instructions:
+                      description: Instructions is the snapshotted stage instruction
+                        text.
                       type: string
                     name:
                       description: Name is the stage name, matching a stage in the

@@ -72,11 +72,15 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 
 	var notReadyReasons []string
 
-	// Check Gateways.
+	// Check Gateways. Track gateway readiness distinctly from the aggregate
+	// so the GatewayConfigured condition can report a gateway-specific state
+	// separate from Ready (which also folds in skills and collections).
+	var gatewayNotReady []string
 	for _, gwRef := range agent.Spec.Gateways {
 		ready, reason := r.checkRef(ctx, agent.Namespace, gwRef.Ref,
 			&konveyoriov1alpha1.Gateway{}, "Gateway")
 		if !ready {
+			gatewayNotReady = append(gatewayNotReady, reason)
 			notReadyReasons = append(notReadyReasons, reason)
 		}
 	}
@@ -116,6 +120,27 @@ func (r *AgentReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl
 			Message:            strings.Join(notReadyReasons, "; "),
 		})
 	}
+
+	// GatewayConfigured reports whether the Agent has a usable gateway
+	// configuration, independent of Ready. An empty gateway list is valid
+	// and does not block Ready, but it does mean the Agent is not runnable
+	// until an AgentRun names a gateway — surfaced here for the UI.
+	gatewayStatus, gatewayReason, gatewayMessage := metav1.ConditionTrue, "GatewaysReady", "All declared gateways are ready"
+	switch {
+	case len(agent.Spec.Gateways) == 0:
+		gatewayStatus, gatewayReason = metav1.ConditionFalse, "NoGatewaysDeclared"
+		gatewayMessage = "Agent declares no gateways; an AgentRun must name one to run"
+	case len(gatewayNotReady) > 0:
+		gatewayStatus, gatewayReason = metav1.ConditionFalse, "GatewaysNotReady"
+		gatewayMessage = strings.Join(gatewayNotReady, "; ")
+	}
+	meta.SetStatusCondition(&agent.Status.Conditions, metav1.Condition{
+		Type:               ConditionTypeGatewayConfigured,
+		Status:             gatewayStatus,
+		ObservedGeneration: agent.Generation,
+		Reason:             gatewayReason,
+		Message:            gatewayMessage,
+	})
 
 	if err := r.Status().Patch(ctx, &agent, client.MergeFrom(original)); err != nil {
 		logger.Error(err, "Failed to patch Agent status")

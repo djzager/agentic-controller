@@ -1,11 +1,38 @@
+---
+adr: "0016"
+title: "Gateway CRD as Interim Execution Interface"
+description: "Defines the current Gateway CRD and direct Agent Sandbox path while OpenShell remains the deferred execution target."
+status: accepted
+status_note: "Supersedes two clauses of ADR 0004; ADR 0004's OpenShell end-state remains deferred."
+date: "2026-08-17"
+last_updated: "2026-09-01"
+authors:
+  - "David Zager"
+last_reviewed: "2026-08-31"
+implementation_status: amended
+review_note: "Accepted current state: Gateway CRD, direct Agent Sandbox creation, verification Jobs, and provider-specific credential injection. OpenShell remains deferred."
+---
+
 # ADR 0016: Gateway CRD as Interim Execution Interface
 
-**Status:** accepted — supersedes two clauses of ADR 0004 (its *No Gateway
-CRD* decision and its *controller becomes an OpenShell client now* /
-*LLMProvider is removed* framing). ADR 0004's OpenShell end-state stands as
-the deferred target.
-**Date:** 2026-08-17
-**Authors:** David Zager
+**Update (2026-09-01):** `Agent.spec.gateways` becomes optional
+(`MinItems=1` → `MinItems=0`). The gateway list is reframed as a
+**presence-gated curation constraint**: when an Agent lists gateways the
+controller still enforces membership (a run's gateway must be one of them,
+so an architect can lock an Agent to a single gateway — this refines
+"An AgentRun selects exactly one Gateway" below); when the list is empty
+the controller constrains nothing — the run must name a gateway itself,
+which must exist and be `Ready`, and what an empty list means to a user
+(not-runnable vs. free-choice) is a Hub/UI concern. To surface that state
+the Kubernetes-native way, the controller sets a `GatewayConfigured`
+condition on the Agent (`False`/`NoGatewaysDeclared` when the list is empty,
+`False`/`GatewaysNotReady` when a declared gateway is not `Ready`, else
+`True`/`GatewaysReady`) — distinct from `Ready`, so an Agent with no gateways
+is still a valid, `Ready` template. This keeps the controller
+domain-agnostic and lets curated default Agents ship without knowing a
+customer's Gateway name at build time. `AgentRun.spec.gateway` and the
+`Agent.spec.gateways` / `AgentRun.spec.gateway` stable seam are otherwise
+unchanged; AgentWorkflow needs no change. Implementation tracked in #209.
 
 > Numbering note: an earlier PR proposed 0016 (harness git-backend
 > migration) and 0017 (goose credential isolation). Both were nacked and
@@ -59,7 +86,10 @@ It is a Konveyor custom resource, not an OpenShell Gateway Service.
   privacy router is meant to close, accepted as a dev-preview limitation.
 - **The Gateway controller verifies connectivity** by running a Job that
   probes `<endpoint>/v1/models` with the resolved credential, surfacing the
-  result as `status.connectionVerified`.
+  result as `status.connectionVerified`. Providers reached through a cloud
+  SDK rather than an HTTP endpoint (`aws-bedrock`, `gcp-vertex-ai`) have no
+  such surface to probe, so they are marked `Ready` without one, with
+  `reason=VerificationSkipped` and `connectionVerified` left false.
 - **An AgentRun selects exactly one Gateway.** Multi-model-per-run stays
   dropped — this half of ADR 0004 (and the retirement of
   `KONVEYOR_MODEL_<ROLE>_*`) is honoured, not superseded.

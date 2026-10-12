@@ -231,11 +231,13 @@ if [ -n "${SANDBOX}" ]; then
         done
     fi
 
-    # Verify expected content in the logs.
-    if echo "${LOGS}" | grep -q "KONVEYOR_PARAM_SOURCE_URL"; then
-        pass "Params injected as env vars"
+    # Params now ride /run/konveyor/params.json (ADR 0009), not env vars.
+    # The stub cats that file, so its value appearing in the logs proves
+    # the ConfigMap was rendered, mounted, and readable by the agent.
+    if echo "${LOGS}" | grep -q "source_url"; then
+        pass "Params delivered via /run/konveyor/params.json"
     else
-        fail "Params not found in pod logs"
+        fail "Params not found in pod logs (want source_url in params.json)"
     fi
 
     # The stub prints "Skills:" followed by an ls, so grepping the label alone
@@ -290,4 +292,4 @@ echo "E2E PASSED: Full pipeline verified."
 echo ""
 echo "  Secret -> Gateway (verified) -> SkillCard (resolved)"
 echo "  -> Agent (all deps ready) -> AgentRun -> Sandbox -> Pod"
-echo "  -> Params injected, skills mounted, instructions passed"
+echo "  -> Params delivered (params.json), skills mounted, instructions passed"
