@@ -1,0 +1,29 @@
+name: Action pins
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Preview updates without opening a PR
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    uses: konveyor/release-tools/.github/workflows/action-pins.yml@3f50f1bc0bbe18283e295d9ab3cb479a481f276d
+    with:
+      mode: ${{ github.event_name == 'pull_request' && 'verify' || 'update' }}
+      dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
+      ignore-actions: |
+        konveyor/release-tools/*
+        konveyor/ci/*
+    secrets:
+      app-private-key: ${{ secrets.KONVEYOR_BOT_KEY }}
