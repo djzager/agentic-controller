@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   pins:
-    uses: konveyor/release-tools/.github/workflows/action-pins.yml@3f50f1bc0bbe18283e295d9ab3cb479a481f276d
+    uses: konveyor/release-tools/.github/workflows/action-pins.yml@5899b32f399b56d1ae503619c6aefc804c0fbe96
     with:
       mode: ${{ github.event_name == 'pull_request' && 'verify' || 'update' }}
       dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
