@@ -1,0 +1,14 @@
+# Passive shared-runtime ACP demo; build on the pinned dependency image.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+USER 0
+COPY deepagents_acp-0.0.13-py3-none-any.whl agent_client_protocol-0.12.1-py3-none-any.whl /opt/acp-wheels/
+RUN uv pip install --python /opt/lightspeed/.venv/bin/python --no-deps /opt/acp-wheels/*.whl && \
+    /opt/lightspeed/.venv/bin/python -c 'from acp.http.asgi import create_asgi_app; from deepagents_acp.server import AgentServerACP'
+COPY --chmod=0555 lightspeed-runtime /usr/local/bin/lightspeed-runtime-spike
+COPY --chmod=0444 driver.py acp_runtime_server.py fixture_mcp.py /opt/runtime-spike/
+COPY skills/ /opt/runtime-spike/skills/
+RUN chmod -R a+rX /opt/runtime-spike
+USER 1001
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/lightspeed-runtime-spike"]

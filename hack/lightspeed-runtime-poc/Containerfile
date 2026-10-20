@@ -1,0 +1,12 @@
+# Experimental composition; RUNTIME_IMAGE must be a recorded digest built with
+# Containerfile.runtime. The Go binary is compiled from harness/experiments.
+ARG RUNTIME_IMAGE
+FROM ${RUNTIME_IMAGE}
+USER 0
+COPY --chmod=0555 lightspeed-runtime /usr/local/bin/lightspeed-runtime-spike
+COPY --chmod=0444 driver.py fixture_mcp.py /opt/runtime-spike/
+COPY skills/ /opt/runtime-spike/skills/
+RUN chmod -R a+rX /opt/runtime-spike
+USER 1001
+WORKDIR /workspace
+ENTRYPOINT ["/usr/local/bin/lightspeed-runtime-spike"]

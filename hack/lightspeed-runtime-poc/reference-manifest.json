@@ -1,0 +1,82 @@
+{
+  "recorded": "2026-10-20",
+  "baseline": "41afab2c868d37a48b19e62641234e4c55b86d51",
+  "export_scope": "15 prototype source files plus README, findings and this manifest; excludes operational records and historical archive",
+  "source_files": [
+    {
+      "path": "harness/experiments/lightspeed-runtime/main.go",
+      "original_sha256": "9ebc4322b1a92e7e7f1fc61b184ee9fe3d046d3db5f2b09f82a2f96e4a918bf1",
+      "published_sha256": "9ebc4322b1a92e7e7f1fc61b184ee9fe3d046d3db5f2b09f82a2f96e4a918bf1"
+    },
+    {
+      "path": "harness/experiments/lightspeed-runtime/acp.go",
+      "original_sha256": "79cd1fac1a9cfade01f2b1a9737bf940953a82d6032d16f9e86df1e2e53bc397",
+      "published_sha256": "79cd1fac1a9cfade01f2b1a9737bf940953a82d6032d16f9e86df1e2e53bc397"
+    },
+    {
+      "path": "harness/experiments/lightspeed-runtime/main_test.go",
+      "original_sha256": "034fb7766ae5d610b111f4222a842a5a15a9f790fef2078b8cddef40500a4cc9",
+      "published_sha256": "034fb7766ae5d610b111f4222a842a5a15a9f790fef2078b8cddef40500a4cc9"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/.gitignore",
+      "original_sha256": "6feaded4e28ea86e001a6751b4e3d960e8b7c31b9616ff9936b79297086e809b",
+      "published_sha256": "6feaded4e28ea86e001a6751b4e3d960e8b7c31b9616ff9936b79297086e809b"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/Containerfile",
+      "original_sha256": "0f6b2264c79f7ad1f54e2f39894fdcda1770faec58893bae08b03ef1cfe1a95f",
+      "published_sha256": "0f6b2264c79f7ad1f54e2f39894fdcda1770faec58893bae08b03ef1cfe1a95f"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/Containerfile.acp",
+      "original_sha256": "2cbb9c32e153b76e5cca2a542c451ddfc0797e1132a8bc167377b07d3a92c7f6",
+      "published_sha256": "2cbb9c32e153b76e5cca2a542c451ddfc0797e1132a8bc167377b07d3a92c7f6"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/Containerfile.runtime",
+      "original_sha256": "d48b3a2e7fe497b2aefbe6c8bfc3a0c0d5a5a566977e6fc013b8c3ca90b43914",
+      "published_sha256": "d48b3a2e7fe497b2aefbe6c8bfc3a0c0d5a5a566977e6fc013b8c3ca90b43914"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/driver.py",
+      "original_sha256": "dfa910a7b409d891bea1e1f81b7c55b0556c7aa513662627695025e7ec5df538",
+      "published_sha256": "dfa910a7b409d891bea1e1f81b7c55b0556c7aa513662627695025e7ec5df538"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/acp_runtime_server.py",
+      "original_sha256": "1cb9ba27b137da7a958f1e495f36c4c78a8291d0b6d8f674e5add91eb6c28959",
+      "published_sha256": "1cb9ba27b137da7a958f1e495f36c4c78a8291d0b6d8f674e5add91eb6c28959"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/fixture_mcp.py",
+      "original_sha256": "9cfde0f4f153ed201ef9d86b40d76313840922344f694797370ef129e970df4e",
+      "published_sha256": "9cfde0f4f153ed201ef9d86b40d76313840922344f694797370ef129e970df4e"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/continuation_probe.py",
+      "original_sha256": "d7173e8f723f3dae176d67091c8104fc669012c70e113917b709f9b30a15f96d",
+      "published_sha256": "da239894cba93d340e610672b8c99e37c901ea7f3373ef8c4998633569cd62c1"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/acp_adapter_probe.py",
+      "original_sha256": "c988e7cbf0e0d3503f29551b886414f9d09a3f8255966b1cbb3e5ff92e236a4a",
+      "published_sha256": "c988e7cbf0e0d3503f29551b886414f9d09a3f8255966b1cbb3e5ff92e236a4a"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/observe_runtime_acp.py",
+      "original_sha256": "743543e9fdb9ea9c60376214966cb76e7fb7903035602357211dbfde76b806c1",
+      "published_sha256": "743543e9fdb9ea9c60376214966cb76e7fb7903035602357211dbfde76b806c1"
+    },
+    {
+      "path": "hack/lightspeed-runtime-poc/skills/probe/SKILL.md",
+      "original_sha256": "c721f5e0e2295bd90fa576aab2308f787ca5c838ce99cfb218c865a55e9fc7dc",
+      "published_sha256": "c721f5e0e2295bd90fa576aab2308f787ca5c838ce99cfb218c865a55e9fc7dc"
+    },
+    {
+      "path": "hack/lightspeed-contract-poc/acp_reconnect/main.go",
+      "original_sha256": "8f794f5ba4ed11495411e3ff67d20d2e0d5a097b2ca1c0882feeb0195c134fba",
+      "published_sha256": "8f794f5ba4ed11495411e3ff67d20d2e0d5a097b2ca1c0882feeb0195c134fba"
+    }
+  ]
+}

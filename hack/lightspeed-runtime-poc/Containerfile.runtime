@@ -1,0 +1,17 @@
+# Experimental runtime dependency image. Build context is the pinned upstream
+# lightspeed-agentic-sandbox source, with this file copied as Dockerfile.
+FROM registry.access.redhat.com/ubi9/python-312@sha256:b1ed2928e5c7de1a4308e68386f1372f8503d1c0506305fde3a35c252ae53a64
+USER 0
+WORKDIR /opt/lightspeed
+COPY pyproject.toml uv.lock README.md ./
+COPY src/ src/
+RUN pip3.12 install --no-cache-dir uv==0.8.11 && \
+    uv sync --extra deepagents --no-dev --locked && \
+    command -v git && \
+    .venv/bin/python -c 'import lightspeed_agentic.run_agent; import deepagents; import mcp.server.fastmcp'
+ENV PATH="/opt/lightspeed/.venv/bin:${PATH}" \
+    HOME=/home/agent \
+    PYTHONDONTWRITEBYTECODE=1
+RUN mkdir -p /workspace /home/agent && chmod 0777 /workspace /home/agent
+LABEL org.opencontainers.image.revision="325121ba39db810b1e98f38e5a1ca8dc02fecdef"
+USER 1001
