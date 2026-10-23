@@ -1,0 +1,12 @@
+kind: bugfix
+
+description: >
+  Ask the branch, not HEAD, about the push. The harness pushes
+  refs/heads/<branch>, but it decided whether to push at all and counted the
+  commits for the plan ladder's closing rung by reading HEAD. Those are the
+  same history only while the agent stays on the branch, and it need not: an
+  agent that commits to the branch and then moves off it leaves HEAD on
+  commits the remote never receives, and the rung reported those too. Worse,
+  one that lands back on the starting commit made the guard read "no commits
+  produced", so a push with real work to send was skipped. Both now resolve
+  the branch being pushed and compare it against the recorded base.
