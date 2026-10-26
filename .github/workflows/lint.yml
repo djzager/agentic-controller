@@ -2,8 +2,9 @@ name: Lint
 
 on:
   push:
-    branches-ignore:
-      - 'gh-readonly-queue/**'
+    branches:
+      - main
+      - 'release-*'
   pull_request:
   merge_group:
 
