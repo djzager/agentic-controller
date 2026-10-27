@@ -182,6 +182,10 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 	}
 	creds.Branch = cfg.TargetBranch
 
+	if err := prepareMavenSettings(hubClient, cfg.AppID); err != nil {
+		return 1, fmt.Errorf("Maven settings: %w", err)
+	}
+
 	// 3. Clone, strip creds, checkout branch
 	logging.Header("Git Setup")
 	logging.Info("cloning %s...", creds.RepoURL)

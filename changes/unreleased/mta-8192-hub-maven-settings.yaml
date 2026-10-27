@@ -1,0 +1,4 @@
+kind: bugfix
+description: >
+  Prepare Maven user settings from the application's Hub credential before
+  starting standalone agent runs and every workflow stage.
