@@ -17,7 +17,7 @@ func TestPrepareMavenSettingsRedactsCredentials(t *testing.T) {
   <servers><server><id>private-repository</id>
     <password>maven-p&#97;ss&lt;word&gt;</password>
     <passphrase><![CDATA[git-token-value-and-passphrase]]></passphrase>
-  </server></servers>
+  </server><server><id>anonymous-repository</id><password> </password><passphrase/></server></servers>
   <proxies><proxy><password>s3!</password></proxy></proxies>
 </settings>`
 	for _, source := range []string{"assigned", "default", "existing", "Secret mount"} {

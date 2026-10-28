@@ -106,6 +106,9 @@ func (r *redactor) addMavenSettings(settings string) error {
 		if err := decoder.DecodeElement(&value, &start); err != nil {
 			return errors.New("parse Maven user settings for secret redaction")
 		}
+		if strings.TrimSpace(value.Decoded) == "" {
+			continue
+		}
 		secrets = append(secrets, value.Decoded, strings.TrimSpace(value.Decoded), value.Literal, strings.TrimSpace(value.Literal))
 	}
 }
