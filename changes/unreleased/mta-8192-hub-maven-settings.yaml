@@ -2,3 +2,5 @@ kind: bugfix
 description: >
   Prepare Maven user settings from the application's Hub credential before
   starting standalone agent runs and every workflow stage.
+  Credential lookup and settings setup errors, including empty credentials,
+  stop the run even for applications that do not use Maven.

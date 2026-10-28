@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,14 +14,21 @@ import (
 
 // prepareMavenSettings runs in every invocation, independently of skills or
 // workflow stage. An existing user settings file (including a Secret mount)
-// takes precedence over Hub's assigned or default Maven credential.
+// takes precedence over Hub's assigned or default Maven credential. Broken
+// symlinks fail setup instead of falling back to a Hub credential.
 func prepareMavenSettings(client *hub.Client, appID string) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home directory: %w", err)
 	}
 	path := filepath.Join(home, ".m2", "settings.xml")
-	if info, err := os.Stat(path); err == nil {
+	if info, err := os.Lstat(path); err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			info, err = os.Stat(path)
+			if err != nil {
+				return fmt.Errorf("inspect Maven user settings: %w", err)
+			}
+		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("Maven user settings path %s is not a regular file", path)
 		}
@@ -54,12 +62,22 @@ func prepareMavenSettings(client *hub.Client, appID string) error {
 	if err != nil {
 		return fmt.Errorf("create Maven user settings: %w", err)
 	}
-	_, writeErr := f.WriteString(identity.Settings)
-	closeErr := f.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
-		_ = os.Remove(path)
-		return fmt.Errorf("write Maven user settings: %w", err)
+	if err := writeMavenSettings(f, path, identity.Settings); err != nil {
+		return err
 	}
 	logging.Ok("Maven settings prepared at %s", path)
+	return nil
+}
+
+// writeMavenSettings closes the file and removes incomplete settings on failure.
+func writeMavenSettings(f io.WriteCloser, path, settings string) error {
+	_, writeErr := io.WriteString(f, settings)
+	closeErr := f.Close()
+	if err := errors.Join(writeErr, closeErr); err != nil {
+		if removeErr := os.Remove(path); removeErr != nil {
+			err = errors.Join(err, fmt.Errorf("remove incomplete Maven user settings: %w", removeErr))
+		}
+		return fmt.Errorf("write Maven user settings: %w", err)
+	}
 	return nil
 }

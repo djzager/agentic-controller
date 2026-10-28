@@ -199,6 +199,128 @@ func TestPrepareMavenSettingsRejectsInvalidPath(t *testing.T) {
 	}
 }
 
+func TestPrepareMavenSettingsRejectsBrokenSymlink(t *testing.T) {
+	for _, targetDirectory := range []bool{false, true} {
+		t.Run(map[bool]string{false: "dangling Secret mount", true: "symlink to directory"}[targetDirectory], func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home)
+			path := filepath.Join(home, ".m2", "settings.xml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(home, "mounted-settings")
+			if targetDirectory {
+				if err := os.Mkdir(target, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				t.Error("an invalid existing settings symlink must fail before a Hub lookup")
+				w.WriteHeader(http.StatusForbidden)
+			}))
+			defer server.Close()
+
+			err := prepareMavenSettings(hub.NewClient(server.URL, "token"), "42")
+			wantErr := "inspect Maven user settings"
+			if targetDirectory {
+				wantErr = "not a regular file"
+			}
+			if err == nil || !strings.Contains(err.Error(), wantErr) {
+				t.Fatalf("error = %v, want %q", err, wantErr)
+			}
+			if !targetDirectory && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("error = %v, want the missing-target error", err)
+			}
+			if got, err := os.Readlink(path); err != nil || got != target {
+				t.Errorf("settings symlink changed: target = %q, error = %v", got, err)
+			}
+		})
+	}
+}
+
+func TestWriteMavenSettingsFailure(t *testing.T) {
+	writeErr := errors.New("write failed")
+	closeErr := errors.New("close failed")
+	for _, tt := range []struct {
+		name         string
+		writeErr     error
+		closeErr     error
+		blockCleanup bool
+	}{
+		{name: "write", writeErr: writeErr},
+		{name: "close", closeErr: closeErr},
+		{name: "write and close", writeErr: writeErr, closeErr: closeErr},
+		{name: "write and cleanup", writeErr: writeErr, blockCleanup: true},
+		{name: "close and cleanup", closeErr: closeErr, blockCleanup: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "settings.xml")
+			if tt.blockCleanup {
+				// A nonempty directory makes os.Remove fail deterministically,
+				// even when tests run as root.
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(path, "blocker"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("partial settings"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f := &failingMavenSettingsWriter{writeErr: tt.writeErr, closeErr: tt.closeErr}
+			const settings = "<settings>repository-password</settings>"
+			err := writeMavenSettings(f, path, settings)
+			if err == nil || !strings.Contains(err.Error(), "write Maven user settings") {
+				t.Fatalf("error = %v, want settings write failure", err)
+			}
+			for _, cause := range []error{tt.writeErr, tt.closeErr} {
+				if cause != nil && !errors.Is(err, cause) {
+					t.Errorf("error = %v, want wrapped cause %v", err, cause)
+				}
+			}
+			if !f.closed {
+				t.Error("settings file was not closed after writing")
+			}
+			if strings.Contains(err.Error(), settings) {
+				t.Error("error exposed the credential contents")
+			}
+			if tt.blockCleanup {
+				var pathErr *os.PathError
+				if !errors.As(err, &pathErr) || pathErr.Op != "remove" || pathErr.Path != path {
+					t.Errorf("error = %v, want wrapped removal error for %s", err, path)
+				}
+				if !strings.Contains(err.Error(), "remove incomplete Maven user settings") {
+					t.Errorf("error = %v, want explicit cleanup failure", err)
+				}
+			} else if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("incomplete settings were not removed: %v", err)
+			}
+		})
+	}
+}
+
+type failingMavenSettingsWriter struct {
+	writeErr error
+	closeErr error
+	closed   bool
+}
+
+func (f *failingMavenSettingsWriter) Write(p []byte) (int, error) {
+	if f.writeErr != nil {
+		return 0, f.writeErr
+	}
+	return len(p), nil
+}
+
+func (f *failingMavenSettingsWriter) Close() error {
+	f.closed = true
+	return f.closeErr
+}
+
 func TestPrepareMavenSettingsDoesNotOverwriteConcurrentFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

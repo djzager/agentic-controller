@@ -115,12 +115,15 @@ at `$HOME/.m2/settings.xml` (`/home/harness/.m2/settings.xml` in the agent
 images). An existing settings file, including one mounted from a Secret or
 ConfigMap, takes precedence and is left unchanged. Otherwise, the harness
 retrieves the application's assigned Maven credential from Hub, falling back
-to the default Maven credential if none is assigned.
+to the default Maven credential if none is assigned. A broken settings symlink
+stops setup before any credential lookup and is left unchanged.
 
 The harness creates the file with mode `0600` outside the repository. It logs
 the file's location, never its contents. If no credential applies, Maven keeps
 its normal defaults. Credential lookup and file setup failures stop the run
 with an error; an assigned credential with empty settings is also an error.
+If a write fails, the harness removes the incomplete settings file. Failure to
+remove it is reported alongside the write or close error.
 
 This setup runs for standalone AgentRuns and separately in every workflow
 stage's fresh Sandbox, independently of the selected skills. The settings
