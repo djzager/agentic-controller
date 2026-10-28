@@ -174,13 +174,18 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 		return 1, fmt.Errorf("hub resolution: %w", err)
 	}
 	// Model text is logged at stage end; whatever it says, the
-	// credentials goose inherits from this environment must not be in it.
+	// credentials goose can read must not be in it. Maven setup adds the
+	// secrets from the effective settings file before goose starts.
 	red := newRedactor(cfg.APIKey, cfg.HubToken, cfg.ACPSecretKey, creds.Token)
 
 	if cfg.TargetBranch == creds.Branch {
 		return 1, fmt.Errorf("TARGET_BRANCH %q must differ from source branch", cfg.TargetBranch)
 	}
 	creds.Branch = cfg.TargetBranch
+
+	if err := prepareMavenSettings(hubClient, cfg.AppID, red); err != nil {
+		return 1, fmt.Errorf("Maven settings: %w", err)
+	}
 
 	// 3. Clone, strip creds, checkout branch
 	logging.Header("Git Setup")
@@ -581,7 +586,7 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 			{Type: "text", Text: handoffPromptText},
 		}, cfg.MaxCost)
 		if handoffErr != nil {
-			logging.Warn("handoff prompt: %v — continuing, the limit-reached outcome stands", handoffErr)
+			logging.Warn("handoff prompt: %s — continuing, the limit-reached outcome stands", red.redact(handoffErr.Error()))
 		}
 		if handoffResult != nil {
 			logAgentClosingMessage(handoffResult, red)
@@ -610,7 +615,7 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 	// the limit handoff is not a verdict on finished work.
 	var verdict handoffVerdict
 	if stageOutcome == outcomeSucceeded {
-		if v, ok := stageHandoff(cloneDir, repo, baseSHA); ok {
+		if v, ok := stageHandoff(cloneDir, repo, baseSHA, red); ok {
 			verdict = v
 			switch {
 			case v.failed():
@@ -621,10 +626,10 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 				}
 				logging.Warn("%s", msg)
 			case v.recognised():
-				logging.Info("handoff reports Status: %s", v.Status)
+				logging.Info("handoff reports Status: %s", red.redact(v.Status))
 			default:
 				logging.Warn("handoff reports Status: %q, which the harness does not recognise "+
-					"(completed, passed, failed) — ignored", v.Status)
+					"(completed, passed, failed) — ignored", red.redact(v.Status))
 			}
 		}
 	}
@@ -642,8 +647,8 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 			ExitCode:      stageOutcome.exitCode(),
 			Outcome:       stageOutcome.String(),
 			LimitReached:  string(limit),
-			HandoffStatus: verdict.Status,
-			StopReason:    primaryResult.StopReason,
+			HandoffStatus: red.redact(verdict.Status),
+			StopReason:    red.redact(primaryResult.StopReason),
 			Usage:         &u,
 		}
 		switch {
