@@ -55,13 +55,8 @@ type MemorySampler struct {
 
 func (MemorySampler) NeedLeaderElection() bool { return false }
 
-func (s MemorySampler) Start(ctx context.Context) error {
-	if s.Interval < 0 {
-		return fmt.Errorf("memory log interval must not be negative")
-	}
-	if s.Interval == 0 || ctx.Err() != nil {
-		return nil
-	}
+// Capture writes one sample without waiting for the manager or its cache.
+func (s MemorySampler) Capture() {
 	fields := []struct{ name, metric string }{
 		{"heap_alloc_bytes", "/memory/classes/heap/objects:bytes"},
 		{"heap_live_bytes", "/gc/heap/live:bytes"},
@@ -76,17 +71,24 @@ func (s MemorySampler) Start(ctx context.Context) error {
 	for i, field := range fields {
 		samples[i].Name = field.metric
 	}
-	capture := func() {
-		metrics.Read(samples)
-		values := make([]any, 0, 2*len(samples))
-		for i, sample := range samples {
-			if sample.Value.Kind() == metrics.KindUint64 {
-				values = append(values, fields[i].name, sample.Value.Uint64())
-			}
+	metrics.Read(samples)
+	values := make([]any, 0, 2*len(samples))
+	for i, sample := range samples {
+		if sample.Value.Kind() == metrics.KindUint64 {
+			values = append(values, fields[i].name, sample.Value.Uint64())
 		}
-		s.Log.Info("Controller memory sample", values...)
 	}
-	capture()
+	s.Log.Info("Controller memory sample", values...)
+}
+
+func (s MemorySampler) Start(ctx context.Context) error {
+	if s.Interval < 0 {
+		return fmt.Errorf("memory log interval must not be negative")
+	}
+	if s.Interval == 0 || ctx.Err() != nil {
+		return nil
+	}
+	s.Capture()
 	ticker := time.NewTicker(s.Interval)
 	defer ticker.Stop()
 	for {
@@ -94,7 +96,7 @@ func (s MemorySampler) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			capture()
+			s.Capture()
 		}
 	}
 }

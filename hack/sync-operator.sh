@@ -115,6 +115,10 @@ render_role \
   "# Synced from konveyor/agentic-controller config/rbac/metrics_reader_role.yaml.
 # Renamed to avoid colliding with another metrics-reader role."
 
+# Copying templates does not install their resources. When this adds variables
+# or operands, the resulting operator PR must also add role defaults and lifecycle
+# tasks. In particular, reconcile the metrics Service/credentials before applying
+# the Deployment that requires the service-serving certificate Secret.
 # Controller operand templates -- verbatim copies. They carry operator-specific
 # Jinja ({{ agentic_fqin }}, namespace, labels, SA) that a reserialization would
 # reformat, so we maintain it as a first-class artifact here and copy it as-is.

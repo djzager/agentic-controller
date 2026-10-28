@@ -1,10 +1,17 @@
 # Controller memory diagnostics
 
-The operator enables authenticated HTTPS metrics whenever the agentic controller
-is enabled. The controller also logs a memory sample at startup and every 30
-seconds. Profiling is disabled by default. These diagnostics support an OOM
-investigation; they do not establish that a leak exists or that an increase to a
-particular memory limit fixes the underlying cause.
+The controller captures a memory baseline before cache synchronization and
+logs periodic samples every 30 seconds after synchronization. Profiling is
+disabled by default. These diagnostics support an OOM investigation; they do
+not establish that a leak exists or that a particular memory limit fixes it.
+
+Operator-managed HTTPS metrics and the Tackle CR controls below require the
+separate operator integration, which is pending follow-up to this controller
+change. That integration must add the role defaults, metrics reader identity,
+and reconciliation of the Service, CA ConfigMap, token Secret, and ServiceMonitor
+before applying the Deployment that requires the serving-certificate Secret.
+Until that operator support ships, use the standalone controller flags; the
+Tackle CR examples below describe the completed operator integration.
 
 ## Continuous capture
 

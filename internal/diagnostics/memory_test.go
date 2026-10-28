@@ -25,6 +25,16 @@ import (
 	"github.com/go-logr/logr/funcr"
 )
 
+func TestMemorySamplerCapturesBeforeStart(t *testing.T) {
+	count := 0
+	logger := funcr.NewJSON(func(string) { count++ }, funcr.Options{})
+	sampler := MemorySampler{Log: logger}
+	sampler.Capture()
+	if count != 1 {
+		t.Fatalf("expected a sample without starting the manager, got %d", count)
+	}
+}
+
 func TestMemorySamplerCapturesRuntimeAndStops(t *testing.T) {
 	messages := make(chan string, 10)
 	logger := funcr.NewJSON(func(message string) { messages <- message }, funcr.Options{})

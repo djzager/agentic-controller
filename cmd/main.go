@@ -304,6 +304,9 @@ func main() {
 	}
 	if memoryLogInterval > 0 {
 		sampler := diagnostics.MemorySampler{Interval: memoryLogInterval, Log: ctrl.Log.WithName("diagnostics")}
+		// Non-leader runnables start after cache synchronization; capture the
+		// baseline now so a startup OOM still leaves a memory sample.
+		sampler.Capture()
 		if err := mgr.Add(sampler); err != nil {
 			setupLog.Error(err, "Failed to set up memory sampling")
 			os.Exit(1)
