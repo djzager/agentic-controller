@@ -125,6 +125,12 @@ with an error; an assigned credential with empty settings is also an error.
 If a write fails, the harness removes the incomplete settings file. Failure to
 remove it is reported alongside the write or close error.
 
+Before launching the runtime, the harness registers passwords and passphrases
+from the effective settings file with its log redactor, including existing and
+mounted settings. Both literal XML and decoded values are masked in agent text
+logged by the harness. Unreadable settings or XML parsing errors stop setup;
+parse errors omit XML details to avoid exposing credential contents.
+
 This setup runs for standalone AgentRuns and separately in every workflow
 stage's fresh Sandbox, independently of the selected skills. The settings
 file is not carried between stages through Git. Hub API credentials remain

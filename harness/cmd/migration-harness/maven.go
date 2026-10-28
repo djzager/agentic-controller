@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +17,7 @@ import (
 // workflow stage. An existing user settings file (including a Secret mount)
 // takes precedence over Hub's assigned or default Maven credential. Broken
 // symlinks fail setup instead of falling back to a Hub credential.
-func prepareMavenSettings(client *hub.Client, appID string) error {
+func prepareMavenSettings(client *hub.Client, appID string, red *redactor) error {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("resolve home directory: %w", err)
@@ -31,6 +32,13 @@ func prepareMavenSettings(client *hub.Client, appID string) error {
 		}
 		if !info.Mode().IsRegular() {
 			return fmt.Errorf("Maven user settings path %s is not a regular file", path)
+		}
+		settings, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read Maven user settings for secret redaction: %w", err)
+		}
+		if err := red.addMavenSettings(string(settings)); err != nil {
+			return err
 		}
 		logging.Info("using existing Maven user settings at %s", path)
 		return nil
@@ -52,6 +60,9 @@ func prepareMavenSettings(client *hub.Client, appID string) error {
 	if strings.TrimSpace(identity.Settings) == "" {
 		return fmt.Errorf("Maven credential %d has empty settings", identity.ID)
 	}
+	if err := red.addMavenSettings(identity.Settings); err != nil {
+		return err
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("create Maven settings directory: %w", err)
@@ -67,6 +78,36 @@ func prepareMavenSettings(client *hub.Client, appID string) error {
 	}
 	logging.Ok("Maven settings prepared at %s", path)
 	return nil
+}
+
+// addMavenSettings registers both decoded and literal XML credential values so
+// an agent quoting a password or the settings file cannot expose either form.
+func (r *redactor) addMavenSettings(settings string) error {
+	decoder := xml.NewDecoder(strings.NewReader(settings))
+	var secrets []string
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			r.addSecrets(secrets...)
+			return nil
+		}
+		if err != nil {
+			// XML errors can quote a tag containing credential material.
+			return errors.New("parse Maven user settings for secret redaction")
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || (start.Name.Local != "password" && start.Name.Local != "passphrase") {
+			continue
+		}
+		var value struct {
+			Decoded string `xml:",chardata"`
+			Literal string `xml:",innerxml"`
+		}
+		if err := decoder.DecodeElement(&value, &start); err != nil {
+			return errors.New("parse Maven user settings for secret redaction")
+		}
+		secrets = append(secrets, value.Decoded, strings.TrimSpace(value.Decoded), value.Literal, strings.TrimSpace(value.Literal))
+	}
 }
 
 // writeMavenSettings closes the file and removes incomplete settings on failure.

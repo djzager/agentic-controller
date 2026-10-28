@@ -174,7 +174,8 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 		return 1, fmt.Errorf("hub resolution: %w", err)
 	}
 	// Model text is logged at stage end; whatever it says, the
-	// credentials goose inherits from this environment must not be in it.
+	// credentials goose can read must not be in it. Maven setup adds the
+	// secrets from the effective settings file before goose starts.
 	red := newRedactor(cfg.APIKey, cfg.HubToken, cfg.ACPSecretKey, creds.Token)
 
 	if cfg.TargetBranch == creds.Branch {
@@ -182,7 +183,7 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 	}
 	creds.Branch = cfg.TargetBranch
 
-	if err := prepareMavenSettings(hubClient, cfg.AppID); err != nil {
+	if err := prepareMavenSettings(hubClient, cfg.AppID, red); err != nil {
 		return 1, fmt.Errorf("Maven settings: %w", err)
 	}
 
