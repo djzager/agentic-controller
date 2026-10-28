@@ -107,6 +107,9 @@ render_role \
 # (leader-election-role), renamed to avoid collisions. Permits the controller's
 # leader election. Do not hand-edit -- update by re-syncing."
 
+# Keep this install-scoped role name aligned with the operator-authored reader
+# ServiceAccount and binding. agentic_component_name is a per-Tackle Ansible
+# variable, not a Helm/OLM RBAC resource name.
 render_role \
   "${REPO_ROOT}/config/rbac/metrics_reader_role.yaml" \
   "${rbac_dir}/agentic_metrics_reader_role.yaml" \

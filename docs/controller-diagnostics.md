@@ -10,8 +10,15 @@ separate operator integration, which is pending follow-up to this controller
 change. That integration must add the role defaults, metrics reader identity,
 and reconciliation of the Service, CA ConfigMap, token Secret, and ServiceMonitor
 before applying the Deployment that requires the serving-certificate Secret.
+Merge the controller change first to update the generated operator sync PR, then
+add the integration above before merging that operator PR. Template synchronization
+alone does not complete the operator integration.
 Until that operator support ships, use the standalone controller flags; the
 Tackle CR examples below describe the completed operator integration.
+
+The default memory limit is 400Mi, with a 64Mi request. This raises the previous
+128Mi ceiling to provide more headroom; it does not establish the OOM cause or
+replace memory capture. Resource overrides remain available for investigation.
 
 ## Continuous capture
 

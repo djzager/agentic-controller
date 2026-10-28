@@ -94,7 +94,7 @@ func managerContainer(t *testing.T, path string, stripJinja bool) corev1.Contain
 		// cannot silently remove its Tackle CR override.
 		templateDefaults := map[string]string{
 			"agentic_container_limits_cpu":                                                "500m",
-			"agentic_container_limits_memory":                                             "128Mi",
+			"agentic_container_limits_memory":                                             "400Mi",
 			"agentic_container_requests_cpu":                                              "10m",
 			"agentic_container_requests_memory":                                           "64Mi",
 			"agentic_metrics_bind_address":                                                ":8443",

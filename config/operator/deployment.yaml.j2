@@ -101,7 +101,7 @@ spec:
         - name: metrics-certs
           secret:
             secretName: "{{ agentic_component_name }}-metrics-tls"
-            # OpenShift supplies this Secret before starting the pod, so the
-            # server never falls back to a temporary self-signed certificate.
+            # On OpenShift with metrics enabled, kubelet holds the pod in
+            # ContainerCreating until service-ca creates this required Secret.
             optional: {{ (not (openshift_cluster | bool and agentic_metrics_enabled | bool)) | lower }}
       terminationGracePeriodSeconds: 10
