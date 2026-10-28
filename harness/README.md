@@ -128,7 +128,9 @@ remove it is reported alongside the write or close error.
 Before launching the runtime, the harness registers passwords and passphrases
 from the effective settings file with its log redactor, including existing and
 mounted settings. Both literal XML and decoded values are masked in agent text
-logged by the harness. Unreadable settings or XML parsing errors stop setup;
+logged by the harness. Handoff failure details are redacted before truncation
+and before they reach logs, viewer notices, or termination status.
+Unreadable settings or XML parsing errors stop setup;
 parse errors omit XML details to avoid exposing credential contents.
 
 This setup runs for standalone AgentRuns and separately in every workflow

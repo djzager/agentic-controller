@@ -586,7 +586,7 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 			{Type: "text", Text: handoffPromptText},
 		}, cfg.MaxCost)
 		if handoffErr != nil {
-			logging.Warn("handoff prompt: %v — continuing, the limit-reached outcome stands", handoffErr)
+			logging.Warn("handoff prompt: %s — continuing, the limit-reached outcome stands", red.redact(handoffErr.Error()))
 		}
 		if handoffResult != nil {
 			logAgentClosingMessage(handoffResult, red)
@@ -615,7 +615,7 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 	// the limit handoff is not a verdict on finished work.
 	var verdict handoffVerdict
 	if stageOutcome == outcomeSucceeded {
-		if v, ok := stageHandoff(cloneDir, repo, baseSHA); ok {
+		if v, ok := stageHandoff(cloneDir, repo, baseSHA, red); ok {
 			verdict = v
 			switch {
 			case v.failed():
@@ -626,10 +626,10 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 				}
 				logging.Warn("%s", msg)
 			case v.recognised():
-				logging.Info("handoff reports Status: %s", v.Status)
+				logging.Info("handoff reports Status: %s", red.redact(v.Status))
 			default:
 				logging.Warn("handoff reports Status: %q, which the harness does not recognise "+
-					"(completed, passed, failed) — ignored", v.Status)
+					"(completed, passed, failed) — ignored", red.redact(v.Status))
 			}
 		}
 	}
@@ -647,8 +647,8 @@ func runStage(cmd *cobra.Command, args []string) (code int, err error) {
 			ExitCode:      stageOutcome.exitCode(),
 			Outcome:       stageOutcome.String(),
 			LimitReached:  string(limit),
-			HandoffStatus: verdict.Status,
-			StopReason:    primaryResult.StopReason,
+			HandoffStatus: red.redact(verdict.Status),
+			StopReason:    red.redact(primaryResult.StopReason),
 			Usage:         &u,
 		}
 		switch {
