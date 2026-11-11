@@ -22,6 +22,10 @@ relates_to:
 
 # ADR 0024: Durable Agent Sessions, Inputs, and Learnings
 
+The [review deck](../slides/durable-agent-sessions-2026-11-11.pdf) introduces
+the target use cases before the architecture. Its
+[editable source](../slides/durable-agent-sessions-2026-11-11.md) includes speaker notes.
+
 ## Context
 
 AgentRun and AgentWorkflowRun provide finite invocations. A review bot or
