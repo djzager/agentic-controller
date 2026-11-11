@@ -3,7 +3,7 @@
 Research date: 2026-11-10. This is a research note, not an ADR or an
 implementation commitment. `AgentSession` and its input resource are proposed
 concepts; their schemas and storage have not been selected. The proposed
-contract is now captured in [ADR 0024](../adr/0024-durable-agent-sessions-and-learnings.md).
+contract is now captured in [ADR 0025](../adr/0025-agent-sessions-and-event-routing.md).
 
 ## Research question and design direction
 

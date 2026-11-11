@@ -103,29 +103,41 @@ continuity comes from committed handoff files (e.g.
 `.konveyor/handoff.md`). Tracks per-stage status (Pending, Running,
 Succeeded, Failed).
 
-## Proposed Durable Execution Concepts
+## Proposed Shared Knowledge
 
-The following terms describe [ADR 0024](docs/adr/0024-durable-agent-sessions-and-learnings.md),
-which is proposed and unimplemented.
-
-**AgentSession** — A continuing agent identity with its own conversation and
-workspace, independent of the lifetime of its compute. It handles addressed
-inputs and can delegate finite AgentRuns or AgentWorkflowRuns.
-
-**AgentInput** — One durable request addressed to one AgentSession, with a
-stable request identity and independently observable acceptance and completion.
-_Avoid_: equating completion of a dispatch input with completion of its child run.
+[ADR 0024](docs/adr/0024-agent-learnings.md) is proposed and unimplemented.
+It can be adopted for existing runs and workflows independently of sessions.
 
 **AgentLearning** — A reviewable, reusable lesson whose content and applicability
-are immutable; accepted revisions can inform runs, workflows, and sessions.
+are immutable; accepted revisions can inform independent invocations.
 _Avoid_: treating working notes or a conversation summary as automatically
 accepted shared knowledge.
 
 **Learning Snapshot** — The fixed set of learning revisions selected for a
-consumer: one run, an entire workflow invocation, or one session input.
+consumer, such as one run or an entire workflow invocation. A future session
+integration selects a set for each new input.
+
+## Proposed Event Routing and Continuing Work
+
+[ADR 0025](docs/adr/0025-agent-sessions-and-event-routing.md) is a separate,
+unimplemented proposal whose value and ingress guarantees require a spike.
+
+**AgentRouter** — The component that durably receives events, resolves explicit
+routes, and reconciles delivery to finite invocations or sessions.
+_Avoid_: assuming this name denotes an accepted CRD, model classifier, or part
+of the domain-agnostic execution controller.
+
+**AgentSession** — A continuing agent identity with its own conversation,
+workspace, and outstanding-work state across addressed inputs. It can delegate
+finite AgentRuns or AgentWorkflowRuns.
+
+**AgentInput** — One durable request addressed to one AgentSession, with a
+stable work identity and independently observable acceptance and completion.
+_Avoid_: equating a provider delivery attempt with a new logical input, or
+completion of dispatch with completion of its child run.
 
 **Session Worker** — The deterministic harness responsibility that prepares and
-drives a session's inputs while preserving their progress and learning snapshots.
+drives a session's inputs while preserving their progress and context.
 _Avoid_: using the term for the model-driven agent invocation itself.
 
 ## Personas

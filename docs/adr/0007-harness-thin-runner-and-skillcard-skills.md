@@ -9,18 +9,19 @@ authors:
   - "Savitha Raghunathan"
 last_reviewed: "2026-11-11"
 implementation_status: amended
-review_note: "Hub proxy lookup and shared validation remain strict. Unsupported Maven proxy conversion warns and preserves supplied settings without blocking runs. Deployed MTA 8.3 token scopes and image verification remain a release check. Scoped review: ADR 0024 proposes session orchestration; no session worker or learning preparation is implemented."
+review_note: "Hub proxy lookup and shared validation remain strict. Unsupported Maven proxy conversion warns and preserves supplied settings without blocking runs. Deployed MTA 8.3 token scopes and image verification remain a release check. Scoped review: ADR 0024 proposes memory preparation; ADR 0025 separately proposes a session worker and event router. Neither is implemented."
 ---
 
 # ADR 0007: Harness as Thin Single-Stage Runner with SkillCard-Based Skills
 
-**Update (2026-11-11):** Proposed [ADR 0024](./0024-durable-agent-sessions-and-learnings.md)
-extends the harness with a deterministic session-worker responsibility: claim
-durable inputs, prepare pinned learning files, drive the runtime, and retain
-progress. The existing finite single-stage path remains supported. This is
-proposed orchestration outside the model invocation, not migration intelligence
-moving back into the harness. No new worker is implemented here; Git ownership,
-credential boundaries, and existing execution controls remain unchanged.
+**Update (2026-11-11):** The initially combined proposal is now independent
+[AgentLearning delivery (ADR 0024)](./0024-agent-learnings.md) and
+[session/event routing (ADR 0025)](./0025-agent-sessions-and-event-routing.md).
+The former prepares pinned memory files for existing finite invocations; the
+latter proposes a deterministic session worker. Event ingress and routing are
+a separate component, outside the model invocation and execution controller.
+No new worker or learning adapter is implemented. Git ownership, credential
+boundaries, and existing execution controls remain unchanged.
 
 **Update (2026-08-27):** The harness was slimmed to a minimal entry point — it no longer injects `.gitignore` entries for build artifacts (§3, "Thin single-stage runner" step 3) or authors the grounding-data commit (Alternatives, "Harness commits instead of agent"). See `docs/entry-point.md` for the current contract.
 

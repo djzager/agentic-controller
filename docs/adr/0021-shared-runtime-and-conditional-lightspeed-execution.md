@@ -10,7 +10,7 @@ authors:
   - "David Zager"
 last_reviewed: "2026-11-11"
 implementation_status: deferred
-review_note: "Runtime reuse and custom-image execution were demonstrated separately. Full runtime adoption requires compatibility work for existing interaction, execution controls, session continuation, and inspection behavior. Operator placement, credential delivery, and lifecycle design remain open. Production integration is unimplemented. Scoped review: ADR 0024 proposes the durable-session follow-up and a spike; no recovery or new backend is qualified."
+review_note: "Runtime reuse and custom-image execution were demonstrated separately. Full runtime adoption requires compatibility work for existing interaction, execution controls, session continuation, and inspection behavior. Operator placement, credential delivery, and lifecycle design remain open. Production integration is unimplemented. Scoped review: separate ADRs 0024/0025 propose learning delivery and event-driven sessions; recovery and new backends remain unqualified."
 relates_to:
   - "0001"
   - "0004"
@@ -21,13 +21,14 @@ relates_to:
 
 # ADR 0021: Shared Runtime and Conditional Lightspeed Execution
 
-**Update (2026-11-11):** Proposed [ADR 0024](./0024-durable-agent-sessions-and-learnings.md)
-develops the durable-session follow-up below, with a harness session worker and
-file-based approved learnings. Its spike targets the shared runtime integration
-and must preserve inspection, interaction, and execution controls. It does not
-change this ADR's current preview trade-offs, demonstrate process recovery, or
-qualify another execution backend. Resource names remain subject to the
-capability-driven migration described here.
+**Update (2026-11-11):** The follow-up proposals are now separate:
+[ADR 0024](./0024-agent-learnings.md) covers file-based approved learnings for
+finite invocations; [ADR 0025](./0025-agent-sessions-and-event-routing.md)
+investigates event admission and continuing sessions. Each has its own spike.
+They retain the shared runtime target and existing inspection, interaction, and
+execution controls. They neither change current preview trade-offs nor qualify
+recovery or another backend. Resource names remain subject to the migration
+path described here.
 
 ## Context
 

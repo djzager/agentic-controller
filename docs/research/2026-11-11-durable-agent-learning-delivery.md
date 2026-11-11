@@ -7,9 +7,11 @@ proposed resources. Vendor uses of “agent” and “session” are not our glo
 definitions.
 
 The proposed contract and next experiment are captured in
-[ADR 0024](../adr/0024-durable-agent-sessions-and-learnings.md) and its
-[spike plan](../spikes/durable-agent-sessions-and-learnings.md). The findings
-below are research evidence, not implemented guarantees.
+[ADR 0024](../adr/0024-agent-learnings.md) and its
+[spike plan](../spikes/agent-learning-delivery.md). The findings
+below are research evidence, not implemented guarantees. Continuing sessions
+and their event-ingress contract are now a separate proposal in
+[ADR 0025](../adr/0025-agent-sessions-and-event-routing.md).
 
 ## Finding
 

@@ -10,18 +10,19 @@ authors:
   - "Dylan Murray"
 last_reviewed: "2026-11-11"
 implementation_status: amended
-review_note: "Core decisions remain useful with amendments in ADRs 0006, 0007, 0009, 0015, and 0016. OpenShell credential isolation survives managed-route removal; its integration and the separate harness push-credential boundary remain unvalidated. Scoped review: ADR 0024 proposes sessions and a replacement for deferred per-Agent MCP memory; current APIs are unchanged."
+review_note: "Core decisions remain useful with amendments in ADRs 0006, 0007, 0009, 0015, and 0016. OpenShell credential isolation survives managed-route removal; its integration and the separate harness push-credential boundary remain unvalidated. Scoped review: ADR 0024 independently proposes shared learnings; ADR 0025 investigates sessions and event admission. Current APIs are unchanged."
 ---
 
 # ADR 0001: Agentic Platform CRD Architecture
 
-**Update (2026-11-11):** Proposed [ADR 0024](./0024-durable-agent-sessions-and-learnings.md)
-adds AgentSession, AgentInput, and AgentLearning concepts. If accepted, its
-immutable shared learning model replaces only the deferred "Per-agent memory
-service (Phase 4)" assumption below for approved knowledge. The original
-proposal remains recorded here; no MCP memory integration or new resource is
-implemented by this documentation change. Generic controller boundaries,
-Agent Sandbox dependency, and finite workflows' Git handoffs remain in force.
+**Update (2026-11-11):** The initially combined follow-up has been split into
+proposed [ADR 0024](./0024-agent-learnings.md) for shared learnings and
+[ADR 0025](./0025-agent-sessions-and-event-routing.md) for sessions and event
+routing. If accepted, ADR 0024 replaces only the deferred "Per-agent memory
+service (Phase 4)" assumption for approved knowledge. ADR 0025 separately
+investigates continuing work and duplicate-safe event admission. Neither is
+implemented; generic controller boundaries, Agent Sandbox, and finite
+workflows' Git handoffs remain in force.
 
 **Update (2026-10-20):** [ADR 0021](./0021-shared-runtime-and-conditional-lightspeed-execution.md)
 records the shared DeepAgents runtime target and conditional Lightspeed execution
