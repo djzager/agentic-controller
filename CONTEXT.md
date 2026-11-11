@@ -103,6 +103,31 @@ continuity comes from committed handoff files (e.g.
 `.konveyor/handoff.md`). Tracks per-stage status (Pending, Running,
 Succeeded, Failed).
 
+## Proposed Durable Execution Concepts
+
+The following terms describe [ADR 0024](docs/adr/0024-durable-agent-sessions-and-learnings.md),
+which is proposed and unimplemented.
+
+**AgentSession** — A continuing agent identity with its own conversation and
+workspace, independent of the lifetime of its compute. It handles addressed
+inputs and can delegate finite AgentRuns or AgentWorkflowRuns.
+
+**AgentInput** — One durable request addressed to one AgentSession, with a
+stable request identity and independently observable acceptance and completion.
+_Avoid_: equating completion of a dispatch input with completion of its child run.
+
+**AgentLearning** — A reviewable, reusable lesson whose content and applicability
+are immutable; accepted revisions can inform runs, workflows, and sessions.
+_Avoid_: treating working notes or a conversation summary as automatically
+accepted shared knowledge.
+
+**Learning Snapshot** — The fixed set of learning revisions selected for a
+consumer: one run, an entire workflow invocation, or one session input.
+
+**Session Worker** — The deterministic harness responsibility that prepares and
+drives a session's inputs while preserving their progress and learning snapshots.
+_Avoid_: using the term for the model-driven agent invocation itself.
+
 ## Personas
 
 **Platform Admin** — Creates and manages SkillCards, SkillCollections,
@@ -217,6 +242,9 @@ start and writes discoveries at session end. Accumulates domain
 knowledge (patterns, pitfalls, API mappings) across executions,
 enabling organizational learning. Each Agent has its own memory
 service instance.
+_Deferred_: this is the earlier concept in ADR 0001. Proposed ADR 0024 replaces
+that assumption for approved shared knowledge with AgentLearnings; it does not
+require a Memory Service for their delivery.
 
 ## Execution Concepts
 
