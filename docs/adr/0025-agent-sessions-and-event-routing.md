@@ -5,12 +5,12 @@ description: "Proposes an event receiver/router, duplicate-safe input admission,
 status: proposed
 status_note: "Exploratory proposal. Must demonstrate value over direct AgentRun triggers and qualify ingress/recovery before API adoption."
 date: "2026-11-11"
-last_updated: null
+last_updated: "2026-11-11"
 authors:
   - "David Zager"
 last_reviewed: "2026-11-11"
 implementation_status: deferred
-review_note: "Webhook ingress, AgentRouter, AgentSession, and AgentInput are unimplemented. The spike must prove provider recovery, duplicate-safe admission, and useful cross-input coordination."
+review_note: "Webhook ingress, AgentRouter, AgentSession, and AgentInput are unimplemented. The spike must prove source registration/lifecycle, provider recovery, duplicate-safe admission, useful cross-input coordination, and correlated publication."
 relates_to:
   - "0001"
   - "0002"
@@ -21,6 +21,11 @@ relates_to:
 ---
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
+
+**Update (2026-11-11):** Extend the initial ingress proposal to cover source
+registration, ownership, validation, removal, and publication back to the source.
+The first investigation uses a managed GitHub repository webhook; provider
+bootstrap and live qualification remain explicit work, not implemented behavior.
 
 This proposal separates continuing work from
 [AgentLearning](0024-agent-learnings.md). Sessions can use existing skills and
@@ -103,6 +108,79 @@ flowchart LR
     Worker -->|delegate| Run
     Run -->|durable completion event| Inbox
 ```
+
+## Source setup and lifecycle
+
+An input queue is only useful when source events can reach it. AgentRouter must
+own source-subscription reconciliation as well as event delivery. Use an
+internal subscription record initially; a public resource name/schema remains
+open. A subscription binds provider/repository identity, desired events, stable
+callback address, credential and signing-secret references, enabled state, and
+ownership. Record provider hook ID, observed configuration generation, verified
+delivery, and recovery coverage separately.
+
+One source subscription can serve several routes and sessions. Adding a route
+must not register another provider hook. The Hub or an operator supplies source
+configuration and permitted destinations; the always-available integration layer
+manages the subscription. Neither a sleeping session nor the execution controller
+owns provider registration credentials.
+
+Distinguish two explicit ownership modes:
+
+- **Managed:** the router may create, update, disable, and remove its owned hook.
+- **Existing:** bind a supplied provider hook ID and verify delivery; its owner
+  retains lifecycle control. Do not silently adopt or delete it.
+
+For the first spike, investigate one managed GitHub repository webhook. A
+GitHub App's shared webhook is a separate mode: App registration, event selection,
+installation, and App-level management credentials differ from repository-hook
+management. Keep that alternative open without mixing the two control planes.
+Jira registration also requires a chosen authentication/subscription model;
+renewal and recovery must be qualified for that model. See the
+[provider lifecycle research](../research/2026-11-11-agent-webhook-lifecycle.md).
+
+### Reconcile registration before declaring the source ready
+
+1. Persist desired subscription identity, a unique owned callback path, and the
+   signing-secret version. Prepare a reachable receiver and durable inbox first.
+   The callback path identifies ownership; it is not a secret or authorization.
+2. Persist creation intent before the provider request. Investigate creating
+   disabled, verifying a signed ping, then enabling events; test that sequence
+   against the actual provider. A successful create response alone is not readiness.
+3. Record the provider hook ID. A lost response becomes `CreateUnknown`.
+   Discover only an exact owned callback and compatible saved intent; verify a
+   single candidate before binding it. Ambiguous candidates or uncertain absence
+   require intervention, not another blind create. Secret values are not
+   recoverable from a masked provider response.
+4. Record a verified delivery and activation boundary. Pings are health events,
+   not AgentInputs. State what earlier source history is uncovered and whether
+   current-state backfill can recover desired work.
+5. Reconcile drift and delivery failures independently of session compute.
+   Provider object existence, local pod health, and verified end-to-end delivery
+   are separate observations. Detect duplicate owned hooks while keeping logical
+   input deduplication independent of registration uniqueness.
+
+Operator bootstrap supplies provider authority, allowed repositories, DNS/TLS,
+durable storage, and Secret references. The spike must list these manual steps
+and verify the automation that follows. It must not imply that creating an
+AgentSession grants provider access or installs an App.
+
+### Rotate and disconnect without losing responsibility
+
+Keep API credentials, webhook-signing secrets, and runtime tool credentials
+separate. Preserve configured signing secrets deliberately during provider
+updates. For rotation, stage the new local verifier, update the provider, verify
+newly signed delivery, then retire the old verifier after a bounded overlap.
+Persist uncertain updates; keep credentials out of status/logs. Token expiry,
+App key renewal, and revoked access require their own reconciliation.
+
+Disabling a route stops new work for that route; disabling a shared source
+affects all its routes. Define an explicit cutoff and handling of in-flight
+deliveries. Drain accepted receipts/inputs or explicitly cancel them under their
+normal lifecycle. For managed teardown, deactivate and delete only the owned
+provider ID, verify uncertain deletion, and retain delivery/history records.
+Lost credentials leave visible orphaned cleanup responsibility. Existing mode
+never deletes the external owner's registration.
 
 ## Event-to-input contract
 
@@ -286,6 +364,37 @@ transcripts, runtime checkpoints, and action receipts distinct. Hub can correlat
 application history without sharing every session's conversation/workspace.
 Future IDE/CLI and Agent Substrate/Agent Executor integrations remain possible
 but are separate qualifications, not prerequisites for this proposal.
+
+## Close the loop with a correlated outcome
+
+The demonstration must link subscription/hook identity, source delivery,
+receipt, route plan, AgentInput UID, delegated AgentRun UID, durable child
+outcome, completion input, and publication identity/provider result ID. A
+successful webhook response proves receipt only; completing a dispatch input
+is not proof of a successful child or a published result.
+
+Use explicit API input with a stable caller key for initial human follow-up.
+GitHub comment commands would additionally need an event subscription and
+an author-authorization policy; a valid provider signature alone does not give
+every commenter authority to steer work. Define how bot-authored publication
+events are ignored or treated as acknowledgments, with recorded dispositions,
+so publishing a result cannot start an unbounded feedback loop.
+
+A deterministic effect adapter records the session's desired publication with
+repository/PR identity, reviewed SHA, and stable operation identity, then saves
+the returned provider ID. For GitHub, always bind the review to the SHA actually
+examined. Head lookup followed by review creation has a race; the first contract
+is correct revision attribution plus explicit stale-result handling, not an
+atomic promise that an old review can never appear after a new push. The
+[review API](https://docs.github.com/en/rest/pulls/reviews) does not document such
+a conditional creation primitive or caller idempotency key.
+
+Fence concurrent publishers. Provider lookup and an operation marker can help
+recover a lost publication response, but do not establish server-enforced
+uniqueness. If the outcome cannot be determined safely, preserve a visible
+interruption instead of blindly publishing twice. Test this return path and
+provider recovery after restart, then demonstrate idle sleep and a later input
+that uses the recorded outcome.
 
 ## Concrete first implementation to investigate
 

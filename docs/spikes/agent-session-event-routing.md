@@ -5,6 +5,10 @@ Status: proposed, 2026-11-11. Supports
 have run. This spike is independent of AgentLearning; use existing skills and
 static context until the session value is established.
 
+**Update (2026-11-11):** Expand the experiment from delivery of an already
+configured event to source registration, verified activation, teardown, and
+publication back to the source. All checks remain proposed and unexecuted.
+
 ## Decision to inform
 
 Does a continuing session make a repeated-event workflow materially simpler or
@@ -19,8 +23,10 @@ proposal does not pass its value gate.
 Build a separately deployed receiver/router alongside Agent Sandbox/controller
 execution. Start with one GitHub webhook contract and deterministic routes;
 add Jira only after checking the intended registration/authentication model.
-Use provider-authenticated fixtures and an isolated namespace, not production
-webhooks or external side effects. Record what was simulated versus exercised.
+Start with provider-authenticated fixtures and an isolated namespace. Then
+qualify the same path in a dedicated test repository under separately authorized
+provider access. Record fixtures and live evidence separately. This proposal
+does not itself authorize registering hooks or posting reviews.
 
 For the bounded prototype, use a retained SQLite store with one active router,
 transactions/unique keys for receipts and logical deliveries, and retained route
@@ -56,6 +62,34 @@ Implement:
 Evidence must show the receipt, route revision/plan, logical key, admitted CR
 name/UID, and delivery state. An HTTP 202 is a receipt, not routing or execution
 completion. Set explicit dedup/replay retention for the experiment.
+
+### Source lifecycle required for Gate 1
+
+Start with one managed GitHub repository hook shared across multiple routes.
+Use the [lifecycle research](../research/2026-11-11-agent-webhook-lifecycle.md)
+to pin the intended API/edition and permissions. An operator supplies a test
+repository, reachable DNS/TLS, durable storage, and credential/signing-secret
+references. A limited test token or dedicated authentication-only GitHub App
+installation is bootstrap; App-native webhooks are a different integration mode.
+
+Implement a durable source record before choosing its public API. Prove desired
+configuration becomes an owned provider hook, a verified signed ping, and enabled
+event delivery. Prepare the receiver before registration. Test the proposed
+disabled-create/verify/enable sequence with the provider; mark any unsupported
+step explicitly. Readiness must show the activation boundary and uncovered
+pre-subscription history.
+
+Inject lost create/update/delete responses. Preserve uncertain operation state,
+discover only the exact owned callback/intent, and surface ambiguous adoption.
+Test an unrelated hook and a second route; neither may cause an extra registration
+or unauthorized provider modification. Existing mode must verify a supplied
+hook without adopting its lifecycle.
+
+Also test signing-secret rotation with in-flight events, drift, expired/revoked
+credentials, and managed teardown. Define the disable cutoff, retain accepted
+work, verify remote removal, and expose orphaned cleanup when access is lost.
+Provider response success and receiver health do not substitute for verified
+delivery. Never store secrets in the evidence bundle.
 
 ## Failure cases required for Gate 1
 
@@ -100,15 +134,30 @@ Use a PR review sequence against both the direct-run baseline and a session:
    B once; do not let old results publish as a review of the new head.
 4. Child outcomes arrive out of order. The continuing owner must correlate them
    with the recorded revisions and human decision before acting.
-5. Complete an input, remove compute, and later deliver a follow-up referring to
+5. Publish a correlated review for the intended SHA and save its provider ID,
+   or retain a visible interruption if publication cannot be established safely.
+6. Complete an input, remove compute, and later deliver a follow-up referring to
    the earlier decision. Fresh compute must restore the relevant state/context.
 
-Use a publication fixture that enforces the expected source revision and stable
-operation identity. A session conversation is not itself an effect fence. A
-fixture can demonstrate control flow; qualify a pinned real Lightspeed/DeepAgents
-runtime for context restoration and actual decision continuity as a separate
-result. Retain approval, steering/cancellation, limits, inspection, and credential
-boundaries; explicitly report untested capabilities.
+Use an explicit API input with a stable caller key for the human follow-up;
+comment-command permissions and subscriptions are a separate extension.
+Retain the complete event/input/child/completion/publication correlation chain,
+and suppress or explicitly handle bot-generated feedback events.
+
+The publication fixture must model the chosen provider's actual limitations:
+record operation intent, fence publishers, check staleness, and attribute a
+review to the SHA examined. GitHub's head lookup followed by POST is not atomic;
+do not give the fixture a stronger conditional-write contract and call that a
+provider guarantee. Inject a head change between those calls and a lost publish
+response. Show correct revision attribution and safe recovery or visible
+uncertainty, rather than promising exactly-once publication.
+
+A fixture demonstrates control flow; qualify real registration, signed delivery,
+redelivery, and review publication in the authorized test repository. Qualify a
+pinned real Lightspeed/DeepAgents runtime for context restoration and actual
+decision continuity as a separate result. Retain approval, steering/cancellation,
+limits, inspection, and credential boundaries; explicitly report untested
+capabilities.
 
 Compare correct dispositions/outcomes, extra coordination state/code required,
 context supplied to the model, and recovery behavior. If the direct route plus
@@ -132,8 +181,9 @@ propose exact order, interruption, and cancellation semantics from the tests.
 
 Return reproducible sources and dependency pins, fixtures, proposed records and
 state transitions, the route/work-key contract, storage/transaction boundaries,
-a failure matrix, and a provider recovery/retention runbook. Keep fixture and
-real-provider/runtime evidence clearly separate.
+a failure matrix, and a source onboarding/rotation/teardown and provider
+recovery/retention runbook. Keep fixture and real-provider/runtime evidence
+clearly separate.
 
 Recommend ingress independently if Gate 1 passes. Recommend AgentSession only
 if Gate 2 demonstrates useful cross-input ownership with qualified recovery.
