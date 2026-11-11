@@ -22,6 +22,11 @@ relates_to:
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
 
+**Update (2026-11-11):** Clarify that an AgentSession can itself be the routing
+agent. Configured delivery may address a specialist directly or a session that
+assesses the event and delegates onward. This does not require a separate
+classifier resource or place model judgment in the event-delivery machinery.
+
 **Update (2026-11-11):** Extend the initial ingress proposal to cover source
 registration, ownership, validation, removal, and publication back to the source.
 The first investigation uses a managed GitHub repository webhook; provider
@@ -78,10 +83,19 @@ responsibilities are part of this proposal, not an unspecified upstream box.
 Route configuration names an authenticated source, supported event types,
 deterministic predicates, work-identity policy, delivery purpose, and allowed
 destinations. A destination can be a finite invocation or an existing session.
-Start with rules and explicit mappings; a model classifier is optional later.
-If introduced, its output must be committed before delivery rather than
-recomputed after partial fan-out. Initial delivery to sessions does not implicitly
-create arbitrary sessions; provisioning is an explicit owner/policy action.
+Rules identify the first recipient. That recipient can be a specialist session
+or an AgentSession acting as a routing agent: it assesses the event and may
+create an AgentRun/AgentWorkflowRun or address an AgentInput to another permitted
+session. Both paths compose the same primitives; no separate classifier service
+or resource is required. Record the routing decision and stable dispatch
+identities before downstream delivery, using the normal action/admission
+recovery contract. Initial delivery does not implicitly create arbitrary
+sessions; provisioning is an explicit owner/policy action.
+
+Here, AgentRouter remains a working name for the deterministic event-delivery
+component. The agent that chooses subsequent work is an AgentSession. Public
+configuration names and whether existing eventing resources supply delivery
+remain open; the two responsibilities must not be conflated.
 
 **AgentSession** is a continuing identity configured from an Agent, with its own
 conversation, mutable workspace, and pending-work state. **AgentInput** is one

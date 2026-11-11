@@ -128,8 +128,10 @@ _Avoid_: assuming this name denotes an accepted CRD, model classifier, or part
 of the domain-agnostic execution controller.
 
 **AgentSession** — A continuing agent identity with its own conversation,
-workspace, and outstanding-work state across addressed inputs. It can delegate
-finite AgentRuns or AgentWorkflowRuns.
+workspace, and outstanding-work state across addressed inputs. It can act as
+a specialist or routing agent, delegating finite invocations or addressing
+inputs to other permitted sessions.
+_Avoid_: treating the routing role as a separate required resource kind.
 
 **AgentInput** — One durable request addressed to one AgentSession, with a
 stable work identity and independently observable acceptance and completion.

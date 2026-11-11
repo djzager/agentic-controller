@@ -36,8 +36,9 @@ Separate these responsibilities before choosing public resource names:
 - A schedule records a future wake-up independently of session compute. It
   needs an absolute due time or recurrence with time zone, payload, target,
   cancellation/revision identity, and a missed-occurrence policy.
-- The session owns continuing context and the decision about work. Whether an
-  assessment must instead precede destination selection is still an open choice.
+- The session owns continuing context and the decision about work. A configured
+  recipient can itself assess the event and route work to other permitted
+  sessions or finite invocations.
 
 These are configuration responsibilities, not a decision to introduce three
 new public CRDs. Existing eventing resources may satisfy some of them; our
@@ -71,12 +72,13 @@ the scheduler and input admission remain deterministic.
 
 ## Decision order for the grilling session
 
-The first question is pending: should a deterministic binding deliver to a
-configured AgentSession that decides what to do, or must an assessment first
-choose the destination session/run? The recommendation to test is the former;
-a configured session can itself be a triage agent. This is not yet a decision.
+**Resolved (2026-11-11):** These are composable paths rather than exclusive
+architectures. An AgentSession can itself be the routing agent. Configured
+delivery addresses either a specialist or a session that evaluates the event
+and chooses subsequent work. The routing role does not require another resource
+kind; source delivery and model-driven routing remain distinct responsibilities.
 
-After that answer, examine shared source ownership versus session-local trigger
+Next, examine shared source ownership versus session-local trigger
 configuration, existing eventing dependencies versus a small built-in mechanism,
 Jira registration/polling, schedule creation permissions and missed wakes, then
 the concrete advisory source and applicability mapping. Work through these one
