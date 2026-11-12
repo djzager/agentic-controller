@@ -5,6 +5,11 @@ Status: proposed, 2026-11-11. Supports
 have run. This spike is independent of AgentLearning; use existing skills and
 static context until the session value is established.
 
+**Update (2026-11-12):** The eventual ready-for-review proposal PR must contain
+an actual runnable PoC/demo with real GitHub evidence. A plan, fixture, slide
+deck, or hand-created AgentInput is not sufficient. This document currently
+describes required work; no demo has been implemented or executed yet.
+
 **Update (2026-11-12):** Use AgentInput as the common request for finite
 invocations and session delivery. Begin with the smallest complete product path:
 configure a repository and review Agent, receive a PR-opened webhook, admit one
@@ -218,6 +223,37 @@ outstanding responsibility. Initial scheduling is one active input per session;
 propose exact order, interruption, and cancellation semantics from the tests.
 
 ## Deliverables and decision
+
+### Required proposal PR demonstration
+
+Include runnable prototype sources, manifests/sample configuration, dependency
+versions, and instructions for setup, execution, inspection, and cleanup. Keep
+the experiment isolated from production installation defaults. Document required
+cluster ingress, Agent Sandbox, GitHub authority, and model/runtime credentials;
+the reviewer supplies those values. Choose the actual source registration or
+existing-hook attachment path before implementing setup.
+
+The first walkthrough uses a real test repository and PR review:
+
+1. Configure the repository and review Agent, establish the webhook, and show
+   verified event delivery to the Kubernetes service.
+2. Open a PR, observe its durable AgentInput and correlated AgentRun, then inspect
+   a review published by the real runtime/adapter for the examined revision.
+3. Push another commit and show a new input with its recorded effective policy,
+   plus the configured disposition of any older review still running.
+4. Restart the receiver and redeliver an earlier event. Observe the existing
+   logical input/run rather than a second execution.
+5. Carry a finding across revisions and demonstrate the chosen thread-reuse
+   behavior, preserving the provider identifiers and any human replies.
+6. Disconnect/clean up the demo and report which accepted records are retained.
+
+Save reproducible commands and sanitized observations correlating repository/PR,
+source delivery, input/run UIDs, reviewed revision, configuration revision, and
+published review/thread URLs or IDs. Distinguish successful evidence, limitations,
+and untested failure cases. The live walkthrough is required before proposal
+review; the broader failure matrix and session continuity experiment still
+determine which architectural claims the PoC supports. Issue triage can be a
+later second use case; it is not required to prove this first path.
 
 Return reproducible sources and dependency pins, fixtures, proposed records and
 state transitions, the route/work-key contract, storage/transaction boundaries,

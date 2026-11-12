@@ -95,6 +95,13 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Resolved (2026-11-12):** A ready-for-review PR for this proposal must include
+a working PoC/demo against a real GitHub repository. Start with the PR-review
+AgentRun path, including source setup, a published review, subsequent commits,
+and duplicate delivery. Include runnable code/configuration and reproducible
+evidence; this is outstanding work, not a completed experiment. A finite-run
+demo does not by itself qualify the separate AgentSession continuity claims.
+
 **Resolved (2026-11-12):** Scheduling and publication policy is read from a
 trusted base revision, with repository overrides bounded by centrally enforced
 settings. A PR cannot change its own policy by editing its configuration file.

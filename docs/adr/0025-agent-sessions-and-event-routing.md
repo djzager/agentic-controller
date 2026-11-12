@@ -22,6 +22,13 @@ relates_to:
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
 
+**Update (2026-11-12):** A ready-for-review PR for this proposal must include
+a runnable proof of concept and evidence from a real GitHub repository, not
+only a proposed spike. The first demo targets PR review through AgentInput and
+AgentRun, with source setup, review publication, a later commit, and duplicate
+delivery exercised. This requirement is not yet satisfied. Session-specific
+claims remain subject to the separate continuity experiment.
+
 **Update (2026-11-12):** Resolve the configuration trust question: scheduling
 and publication policy comes from a trusted base revision, not changes proposed
 by the PR being reviewed. Repository overrides remain bounded by centrally
@@ -526,6 +533,26 @@ but must still satisfy stable identity, recovery, retention, and delivery-state
 requirements. No broker brand or CloudEvents envelope eliminates that work.
 
 ## Review and decision gate
+
+Before marking this proposal's PR ready for review, include the executable demo
+implementation, Kubernetes configuration, setup/teardown instructions, pinned
+dependencies, and a reproducible evidence record. A reviewer supplies provider
+and model credentials through documented Secret references; no secrets belong
+in the demonstration artifacts. Name the manual bootstrap steps and show the
+actual source registration/attachment mechanism instead of starting with an
+unexplained preconfigured webhook. The public configuration schema may remain
+experimental, but the demonstrated path must actually run.
+
+Use a real GitHub repository and a real agent runtime to demonstrate a PR event
+being accepted as AgentInput, producing an AgentRun, reviewing a pinned revision,
+and publishing an attributable result. Push a later revision and demonstrate
+the selected configurable older-work policy. Redeliver an event after receiver
+restart and show that it resolves to the original logical input/run. Include
+provider review/thread identifiers and a repeated-finding example. Record
+limitations and uncertain outcomes without describing a single successful demo
+as production qualification. Fixtures still support fault injection, but do not
+replace this live end-to-end evidence. This finite demo is a prerequisite for
+reviewing the proposal; it does not establish AgentSession's additional value.
 
 The [spike](../spikes/agent-session-event-routing.md) starts with one real provider
 contract, a duplicate-safe direct-run route, and then a session scenario that
