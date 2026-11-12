@@ -13,6 +13,7 @@ No new CRDs or source registrations are implemented here.
 - [Advisory ingress](2026-11-11-agent-advisory-ingress.md): affected-repository alerts versus global advisories and the missing applicability step.
 - [Provider webhook lifecycle](2026-11-11-agent-webhook-lifecycle.md): GitHub and Jira registration/authentication distinctions.
 - [Kubernetes eventing conventions and Argo CD](2026-11-12-agent-kubernetes-eventing-standard.md): common event formats, reusable receivers/connectors, deployment notifications, and the unverified TPA integration.
+- [CodeRabbit review policy](2026-11-12-agent-review-policy-coderabbit.md): configuration precedence, automatic rereviews, comment-history behavior, and the limits of documented publication guarantees.
 
 Existing-resource examples are verified against documentation, not executed.
 They are evidence for the design discussion, not a selected platform or a
@@ -94,13 +95,21 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Direction (2026-11-12):** New PR commits normally trigger review. Automatic
+review and treatment of older running reviews should be configurable per
+repository/task. Repository-file settings and defaults on the event-to-execution
+binding are candidates, with precedence and trusted configuration revision still
+open. Separate repeated event execution, repeated findings across reviews, and
+uncertain comment publication. Persistent review history can serve finite runs
+without requiring an AgentSession.
+
 **Direction (2026-11-12):** Broaden AgentInput beyond session delivery: one
 durable request can invoke an Agent or AgentWorkflow, recording its resulting
 run, or address an existing AgentSession. Start with a GitHub PR-opened webhook
 producing a finite review AgentRun and a correlated published result. Event
 matching and parameter mapping are configurable; source authentication and
-allowed destinations remain deterministic. PR updates, exact public schemas,
-and source registration ownership still need decisions. This direction does
+allowed destinations remain deterministic. Exact public schemas and source
+registration ownership still need decisions. This direction does
 not select an eventing platform or require sessions for the first example.
 
 **Research update (2026-11-12):** Multiple ingestion paths should be evaluated

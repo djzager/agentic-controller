@@ -22,6 +22,13 @@ relates_to:
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
 
+**Update (2026-11-12):** New PR commits should normally request another review,
+with automatic review and treatment of older in-flight work configurable per
+repository/task binding. Repository-file overrides and centrally configured
+defaults are candidates; precedence and the trusted configuration revision
+remain open. Duplicate input admission, repeated findings across revisions, and
+recovery of uncertain comment publication are distinct problems.
+
 **Update (2026-11-12):** Broaden the proposed AgentInput from a session-only
 request to the common durable request for event-triggered execution. An input
 selects an Agent or AgentWorkflow to invoke, or an existing AgentSession to
@@ -354,6 +361,38 @@ source version before publishing a version-specific result when required.
 A newer event is not a retry merely because it concerns the same issue, PR,
 or CVE. Explicit replay, retry, and new desired work need distinguishable identities.
 
+For the PR review example, enable review of new commits by default and make
+that behavior configurable. A repository/task binding can choose how to handle
+older work: queue newer work, cancel/supersede older work, or allow concurrent
+work. Whether queued intermediate revisions are coalesced and whether older
+results may publish are separate choices. Preserve a visible disposition for
+every accepted input. These are policy dimensions, not settled public fields or
+an accepted default for older reviews. Cancellation alone cannot prevent a
+publisher already in flight; retain the revision attribution and publication
+recovery contract below.
+
+The proposed configuration boundary is the event-to-execution binding, which
+can express different behavior for different repositories/tasks even when they
+share a webhook endpoint. A repository file may supply permitted overrides or
+review guidance. Exact precedence, filename, trusted source revision, and which
+settings can be overridden remain open. Hub can project application choices
+into this configuration; the controller does not acquire an application model.
+
+Resolve dispatch-affecting settings in the provider/configuration adapter before
+dispatch, rather than waiting for the agent to clone the repository. Record the
+effective policy and source revisions with the immutable input intent; retries
+reuse them, while later inputs may select new policy. The harness/review adapter
+receives the same selected review configuration. Provider-specific configuration
+lookup and comment semantics stay outside the generic execution controller.
+This is a proposed mechanism; existing run parameters/file mounts are carriers,
+not an implemented review-policy resolver.
+
+The [CodeRabbit research](../research/2026-11-12-agent-review-policy-coderabbit.md)
+provides examples of configurable automatic/incremental review, inherited policy,
+administrative overrides, and history-aware review behavior. It does not provide
+an exactly-once comment contract to inherit. Its documented use of feature-branch
+configuration is a product choice to evaluate, not an assumed trust model here.
+
 ### 6. Make delivery responsibility observable
 
 Expose the receipt identity, pinned route revision, each target's delivery key
@@ -422,6 +461,23 @@ an author-authorization policy; a valid provider signature alone does not give
 every commenter authority to steer work. Define how bot-authored publication
 events are ignored or treated as acknowledgments, with recorded dispositions,
 so publishing a result cannot start an unbounded feedback loop.
+
+PR reviews need persistent publication history even when each revision uses an
+independent AgentRun. Keep these three concerns separate:
+
+- Repeated delivery of the same work resolves to the existing input/execution.
+- A genuinely new review can rediscover an existing finding. The review adapter
+  should correlate prior findings and provider threads, then apply an explicit
+  policy for suppressing, updating, or replying to the existing discussion.
+  Preserve human replies. Finding matching across moved/changed code needs its
+  own qualification; hashing comment text is not proof of semantic identity.
+- A comment may have been posted before its response was saved. Use the durable
+  publication record and provider reconciliation below; a prompt instruction to
+  avoid duplicate comments is not recovery machinery.
+
+Retain this history beyond individual run/pod lifetimes under an explicit
+retention policy. An AgentSession may use it, but is not required merely to
+correlate comments across otherwise finite reviews.
 
 A deterministic effect adapter records the session's desired publication with
 repository/PR identity, reviewed SHA, and stable operation identity, then saves

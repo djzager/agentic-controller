@@ -12,7 +12,8 @@ AgentInput, create one AgentRun, check out the event's pinned revision, and
 publish a review attributed to that revision. Record input/run/review identities
 and the outcome. Repeat the event after a receiver restart and prove it does not
 create a second input or run. Publication ambiguity must remain visible under
-the recovery rules below. PR-update behavior is an open policy question. This
+the recovery rules below. New commits request reviews by default; the behavior
+is configurable, and older-review policy remains to be selected. This
 first demonstration precedes the broader failure qualification and session
 comparison; it does not need an AgentSession or select a public route schema.
 
@@ -134,6 +135,27 @@ delivery. Never store secrets in the evidence bundle.
 
 Gate 1 passes only with automated failure evidence, not a happy-path webhook
 that creates a resource once.
+
+### Configurable review behavior
+
+For the finite review path, demonstrate a new revision creating new review work
+and a configured opt-out preventing it. Demonstrate two declared older-work
+policies without treating them as chosen defaults. Record any intermediate input
+that is superseded; cancellation must not silently delete its history.
+
+Record effective configuration and its source revision before dispatch. Change
+repository/binding settings and retry an older input: it must keep its original
+policy. A later input should receive the new applicable policy. Precedence and
+the branch/revision allowed to supply repository overrides are decisions to
+settle before implementing that resolver.
+
+Also carry an unchanged finding across two review revisions. Verify the selected
+comment policy uses the prior thread/provider ID and preserves human discussion.
+Test a moved finding, a distinct nearby finding, and a lost publication response;
+these must not be confused with duplicate webhook delivery. Preserve evidence
+of uncertain matching or publication rather than claiming universal comment
+deduplication. Run this experiment without an AgentSession to isolate the
+publication-history requirement from conversation continuity.
 
 ## Gate 2: a session scenario that uses earlier state
 
