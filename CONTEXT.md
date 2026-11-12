@@ -133,10 +133,13 @@ a specialist or routing agent, delegating finite invocations or addressing
 inputs to other permitted sessions.
 _Avoid_: treating the routing role as a separate required resource kind.
 
-**AgentInput** — One durable request addressed to one AgentSession, with a
-stable work identity and independently observable acceptance and completion.
+**AgentInput** — One durable request to invoke an Agent or AgentWorkflow, or
+deliver work to an existing AgentSession, with a stable work identity and
+independently observable acceptance and completion. A finite invocation records
+the resulting AgentRun or AgentWorkflowRun as its execution.
 _Avoid_: equating a provider delivery attempt with a new logical input, or
-completion of dispatch with completion of its child run.
+completion of dispatch with completion of its child run; treating an existing
+finite run as a queue for unrelated new work.
 
 **Session Worker** — The deterministic harness responsibility that prepares and
 drives a session's inputs while preserving their progress and context.

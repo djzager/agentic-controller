@@ -5,10 +5,10 @@ description: "Proposes an event receiver/router, duplicate-safe input admission,
 status: proposed
 status_note: "Exploratory proposal. Must demonstrate value over direct AgentRun triggers and qualify ingress/recovery before API adoption."
 date: "2026-11-11"
-last_updated: "2026-11-11"
+last_updated: "2026-11-12"
 authors:
   - "David Zager"
-last_reviewed: "2026-11-11"
+last_reviewed: "2026-11-12"
 implementation_status: deferred
 review_note: "Webhook ingress, AgentRouter, AgentSession, and AgentInput are unimplemented. The spike must prove source registration/lifecycle, provider recovery, duplicate-safe admission, useful cross-input coordination, and correlated publication."
 relates_to:
@@ -21,6 +21,16 @@ relates_to:
 ---
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
+
+**Update (2026-11-12):** Broaden the proposed AgentInput from a session-only
+request to the common durable request for event-triggered execution. An input
+selects an Agent or AgentWorkflow to invoke, or an existing AgentSession to
+receive work. Finite invocation records the resulting AgentRun/AgentWorkflowRun;
+it does not append unrelated work to an existing finite run. Start with a GitHub
+PR-opened event producing a review AgentRun and a correlated review result.
+This replaces the earlier diagram's direct event-to-run bypass of AgentInput;
+"direct run" below means finite execution without a session. Public schemas and
+eventing infrastructure remain exploratory and unimplemented.
 
 **Update (2026-11-11):** Clarify that an AgentSession can itself be the routing
 agent. Configured delivery may address a specialist directly or a session that
@@ -99,8 +109,23 @@ remain open; the two responsibilities must not be conflated.
 
 **AgentSession** is a continuing identity configured from an Agent, with its own
 conversation, mutable workspace, and pending-work state. **AgentInput** is one
-immutable addressed request with observable acceptance and completion. Multiple
+immutable addressed request with observable acceptance and completion. Its
+execution choice is one of an Agent invocation, an AgentWorkflow invocation, or
+delivery to an existing AgentSession. Multiple
 sessions can serve the same application without sharing mutable workspaces.
+
+Event configuration supplies matching rules, an allowed execution choice, and
+the mapping from event data to invocation parameters. A webhook payload does not
+grant permission to select arbitrary templates, credentials, or sessions. A
+matched event becomes an AgentInput; finite dispatch creates and records its
+AgentRun or AgentWorkflowRun using a stable identity. The input pins the resolved
+invocation intent so retries cannot pick up changed route parameters. Exact
+template snapshot rules remain to be specified. Acceptance, dispatch, and
+execution outcome are independently visible. For finite work, creating the run
+does not complete the requested work; session handling may complete an input
+after recording a delegation while tracking that child's outcome separately.
+Existing callers can continue creating AgentRuns and AgentWorkflowRuns directly;
+this proposal does not require an input wrapper for every existing invocation.
 
 The Kubernetes controller watches CRs and wakes compute through Agent Sandbox.
 A deterministic **session worker in the harness** claims inputs, restores state,
@@ -114,9 +139,9 @@ flowchart LR
     Receiver --> Inbox["Durable event receipt"]
     Inbox --> Router["AgentRouter: commit route plan"]
     Router --> Delivery["Delivery ledger and reconciler"]
-    Delivery --> Run["AgentRun / AgentWorkflowRun"]
     Delivery --> Input["AgentInput"]
-    Input --> Controller["Controller wakes compute"]
+    Input -->|"invoke Agent / AgentWorkflow"| Run["AgentRun / AgentWorkflowRun"]
+    Input -->|"address existing AgentSession"| Controller["Controller wakes compute"]
     Controller --> Worker["Harness session worker"]
     Worker --> Runtime["Agent runtime"]
     Worker -->|delegate| Run
@@ -276,14 +301,18 @@ For illustration, use unambiguous, versioned canonical encoding:
 ```text
 workKey = providerEventKey OR an explicit semantic work key
 inputKey = encode(v1, tenant, source, routeIdentity, workKey,
-                  targetSessionUID, purpose, replayEpoch)
+                  targetKind, targetUID, purpose, replayEpoch)
 inputName = "input-" + sha256(inputKey)[0:56]
 ```
 
 Route identity is stable across configuration edits. A config update must not
 accidentally create another input for a retry. An intentional replay has a new
-explicit epoch/request ID. Include the session UID so delayed work cannot target
-a replacement incarnation by name alone.
+explicit epoch/request ID. Include the target kind and UID (Agent, AgentWorkflow,
+or AgentSession) so delayed work cannot target a replacement incarnation by name
+alone. For finite work, persist the child run's stable creation identity before
+creation and record its UID afterward; lost responses converge on that child,
+not another invocation. Supported cleanup must preserve unfinished correlation
+and the retained identity after completion.
 
 Create the AgentInput using that exact `metadata.name`, not `generateName`.
 Store the full identity and canonical intent digest. On `AlreadyExists`, read

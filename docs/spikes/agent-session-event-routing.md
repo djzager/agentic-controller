@@ -5,6 +5,17 @@ Status: proposed, 2026-11-11. Supports
 have run. This spike is independent of AgentLearning; use existing skills and
 static context until the session value is established.
 
+**Update (2026-11-12):** Use AgentInput as the common request for finite
+invocations and session delivery. Begin with the smallest complete product path:
+configure a repository and review Agent, receive a PR-opened webhook, admit one
+AgentInput, create one AgentRun, check out the event's pinned revision, and
+publish a review attributed to that revision. Record input/run/review identities
+and the outcome. Repeat the event after a receiver restart and prove it does not
+create a second input or run. Publication ambiguity must remain visible under
+the recovery rules below. PR-update behavior is an open policy question. This
+first demonstration precedes the broader failure qualification and session
+comparison; it does not need an AgentSession or select a public route schema.
+
 **Update (2026-11-11):** Expand the experiment from delivery of an already
 configured event to source registration, verified activation, teardown, and
 publication back to the source. All checks remain proposed and unexecuted.
@@ -49,8 +60,10 @@ Implement:
    gate before a session input can execute or be normally garbage-collected.
 5. Reconciliation after a lost create/readiness response; a retained delivery
    ledger after object cleanup; explicit replay with a new identity and lineage.
-6. A direct AgentRun route as the control path. Qualify its creation/cleanup
-   protection too. Any temporary controller changes or test doubles needed for
+6. An AgentInput selecting an Agent invocation as the control path, with a
+   correlated AgentRun and no session. Qualify input-to-run creation/recovery
+   and cleanup protection too. Creating the run is dispatch, not completion of
+   the requested review. Any temporary controller changes or test doubles needed for
    admission gating must be explicit; existing controllers do not already supply
    this new protocol.
 7. Provider-specific recovery: for GitHub, inspect failed deliveries and request

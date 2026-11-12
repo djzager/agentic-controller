@@ -94,6 +94,15 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Direction (2026-11-12):** Broaden AgentInput beyond session delivery: one
+durable request can invoke an Agent or AgentWorkflow, recording its resulting
+run, or address an existing AgentSession. Start with a GitHub PR-opened webhook
+producing a finite review AgentRun and a correlated published result. Event
+matching and parameter mapping are configurable; source authentication and
+allowed destinations remain deterministic. PR updates, exact public schemas,
+and source registration ownership still need decisions. This direction does
+not select an eventing platform or require sessions for the first example.
+
 **Research update (2026-11-12):** Multiple ingestion paths should be evaluated
 against one durable input-admission contract. CloudEvents is an interoperability
 option; Argo Events and Knative are optional installed platforms. Argo CD can
