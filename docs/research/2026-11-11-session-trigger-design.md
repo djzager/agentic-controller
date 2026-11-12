@@ -70,6 +70,27 @@ close the gap between a due timer and durable acceptance. A fired timer alone
 is not completed work. A model may request the schedule through a bounded tool;
 the scheduler and input admission remain deterministic.
 
+## SBOM service candidates remain open
+
+TPA/Trustify and Dependency-Track may supply the vulnerability-correlation step
+before events reach an agent. They can consume application SBOMs and provide
+findings or changes that an adapter maps to application/session inputs. This is
+an alternative to building the advisory-to-package matcher in our event layer.
+
+[TPA/Trustify research](2026-11-11-agent-tpa-trustify-notifications.md) verifies a
+released upstream change stream with finite replay retention, while leaving
+Red Hat product support unverified. The stream reports document changes; an
+adapter still queries affectedness and maps artifacts to applications.
+[Dependency-Track research](2026-11-11-agent-dependency-track-notifications.md)
+identifies project-aware finding notifications and distinguishes current v5
+contracts from legacy v4 documentation. Its exact deployed-version behavior
+still requires an integration test.
+
+Neither candidate is selected. Source ownership, required delivery semantics,
+and public configuration remain open; the user has not committed to what those
+must look like. A concrete notification experiment should inform the next design
+question rather than turn these candidate capabilities into requirements.
+
 ## Decision order for the grilling session
 
 **Resolved (2026-11-11):** These are composable paths rather than exclusive
