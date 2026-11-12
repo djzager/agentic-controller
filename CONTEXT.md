@@ -125,7 +125,8 @@ unimplemented proposal whose value and ingress guarantees require a spike.
 **AgentRouter** — The component that durably receives events, resolves explicit
 routes, and reconciles delivery to finite invocations or sessions.
 _Avoid_: assuming this name denotes an accepted CRD, model classifier, or part
-of the domain-agnostic execution controller.
+of the domain-agnostic execution controller; assuming provider subscription
+management must share its implementation.
 
 **AgentSession** — A continuing agent identity with its own conversation,
 workspace, and outstanding-work state across addressed inputs. It can act as
@@ -139,7 +140,8 @@ independently observable acceptance and completion. A finite invocation records
 the resulting AgentRun or AgentWorkflowRun as its execution.
 _Avoid_: equating a provider delivery attempt with a new logical input, or
 completion of dispatch with completion of its child run; treating an existing
-finite run as a queue for unrelated new work.
+finite run as a queue for unrelated new work; assigning application or provider
+semantics to its generic execution parameters in the controller.
 
 **Session Worker** — The deterministic harness responsibility that prepares and
 drives a session's inputs while preserving their progress and context.

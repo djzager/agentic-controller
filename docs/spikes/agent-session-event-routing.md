@@ -37,6 +37,16 @@ proposal does not pass its value gate.
 
 ## Gate 1: a real event-admission contract
 
+Keep application/archetype selection and GitHub credential interpretation outside
+the execution controller. The PoC supplies provider-specific setup through an
+adapter and shows the generic AgentInput/run configuration it produces. Include
+a proposed Hub/UI mapping from application/archetype intent to those inputs or
+bindings, clearly distinguishing it from implemented Hub integration. The first
+demo may supply that mapping through standalone configuration; it must not
+require application-aware CRD fields or pretend a full Hub/UI feature exists.
+Decide whether a reusable binding CR is needed or whether the adapter can submit
+AgentInputs directly before choosing public API names.
+
 Build a separately deployed receiver/router alongside Agent Sandbox/controller
 execution. Start with one GitHub webhook contract and deterministic routes;
 add Jira only after checking the intended registration/authentication model.
@@ -84,7 +94,9 @@ completion. Set explicit dedup/replay retention for the experiment.
 
 ### Source lifecycle required for Gate 1
 
-Start with one managed GitHub repository hook shared across multiple routes.
+Investigate one managed GitHub repository hook shared across multiple routes,
+owned by the provider adapter rather than the execution controller. Managed
+versus existing-hook setup remains an integration choice to settle for the demo.
 Use the [lifecycle research](../research/2026-11-11-agent-webhook-lifecycle.md)
 to pin the intended API/edition and permissions. An operator supplies a test
 repository, reachable DNS/TLS, durable storage, and credential/signing-secret
@@ -225,6 +237,13 @@ propose exact order, interruption, and cancellation semantics from the tests.
 ## Deliverables and decision
 
 ### Required proposal PR demonstration
+
+Show the ownership split in both code and setup: provider-specific configuration
+and credentials on the integration side; execution references, input identity,
+opaque invocation data, and status on the controller side. Document how Hub could
+materialize equivalent configuration for an application or archetype, including
+shared repositories and intentional fan-out. A standalone demo does not need to
+implement that Hub/UI projection, but must identify it as separate proposed work.
 
 Include runnable prototype sources, manifests/sample configuration, dependency
 versions, and instructions for setup, execution, inspection, and cleanup. Keep

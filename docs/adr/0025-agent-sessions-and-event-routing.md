@@ -22,6 +22,16 @@ relates_to:
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
 
+**Update (2026-11-12):** Clarify ownership before deciding webhook automation.
+Applications, archetypes, repository matching, and provider credential meaning
+remain outside the execution controller. Hub/UI can express application-scoped
+automation and project it into concrete execution configuration; a provider
+adapter owns GitHub authentication and subscription operations. Earlier text
+assigning subscription reconciliation to AgentRouter describes a responsibility
+the overall ingress design must cover, not a requirement to implement provider
+clients in the generic router or execution controller. Whether event bindings
+are generic CRs or integration-owned configuration remains open.
+
 **Update (2026-11-12):** A ready-for-review PR for this proposal must include
 a runnable proof of concept and evidence from a real GitHub repository, not
 only a proposed spike. The first demo targets PR review through AgentInput and
@@ -172,10 +182,56 @@ flowchart LR
 
 ## Source setup and lifecycle
 
-An input queue is only useful when source events can reach it. AgentRouter must
-own source-subscription reconciliation as well as event delivery. Use an
-internal subscription record initially; a public resource name/schema remains
-open. A subscription binds provider/repository identity, desired events, stable
+### Platform intent, provider integration, and execution
+
+Keep the domain split from ADRs 0001, 0006, and 0013:
+
+- Hub/UI owns "enable PR reviews for application X or archetype Y": membership,
+  application-to-repository association, platform policy, and selection of the
+  Agent/AgentWorkflow or provisioned AgentSession. It can project that intent
+  into concrete bindings without teaching the controller to query Hub.
+- A provider adapter owns repository/event matching, provider authentication,
+  webhook registration or attachment, and provider recovery. Its configuration
+  may reference credentials, but neither the core controller nor a generic
+  execution type needs GitHub-specific credential semantics. The adapter may be
+  supplied by the platform, this project's optional integration tooling, or an
+  existing eventing system; its packaging is not yet selected.
+- The generic execution contract receives an authorized AgentInput with stable
+  work/source identity, a concrete execution choice, opaque parameters or payload
+  references, and recorded policy. It creates/tracks the finite invocation or
+  schedules the addressed session without understanding applications, PRs, or
+  archetype membership. The harness/review adapter interprets task-specific data
+  and performs checkout/publication.
+
+For example, Hub can turn an archetype-level review policy into bindings for its
+member applications. A GitHub adapter resolves a PR event against those bindings
+and produces inputs selecting the review Agent, with PR/revision information as
+opaque execution data and Hub-owned application labels for correlation. Existing
+Hub runtime connectivity can still be delivered through env/Secret references
+for the harness to resolve application data at runtime. Admission-time event
+matching is not permission to move all runtime data resolution into the
+controller. Labels identify provenance; they do not grant provider access.
+
+An archetype can span repositories and several applications can share one
+repository. Do not equate an application, a subscription, and an execution
+binding. Share the source subscription where appropriate, preserve each binding's
+identity, and make intentional fan-out explicit. Changes to platform membership
+affect future routing; retries retain the already committed delivery plan.
+
+These are proposed responsibility mappings, not new implemented Hub endpoints.
+The public type decision is still open: a generic event-to-execution binding CR
+could be materialized by Hub or a standalone operator, or a provider integration
+could keep bindings externally and submit AgentInputs directly. The PoC must
+make that choice explicit, without adding application/repository/GitHub fields
+to the core execution API merely to run a GitHub demo.
+
+### Provider subscription lifecycle
+
+An input queue is only useful when source events can reach it. The ingress design
+must account for source-subscription reconciliation as well as delivery. The
+provider adapter owns that lifecycle; generic execution reconciliation does not.
+An internal subscription record is one prototype option; its public resource
+name/schema and placement remain open. A subscription binds provider/repository identity, desired events, stable
 callback address, credential and signing-secret references, enabled state, and
 ownership. Record provider hook ID, observed configuration generation, verified
 delivery, and recovery coverage separately.
@@ -188,7 +244,7 @@ owns provider registration credentials.
 
 Distinguish two explicit ownership modes:
 
-- **Managed:** the router may create, update, disable, and remove its owned hook.
+- **Managed:** the provider adapter may create, update, disable, and remove its owned hook.
 - **Existing:** bind a supplied provider hook ID and verify delivery; its owner
   retains lifecycle control. Do not silently adopt or delete it.
 

@@ -95,6 +95,23 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Clarified (2026-11-12):** The execution controller remains agnostic to
+applications, archetypes, repositories, and GitHub credentials. Hub/UI can own
+application/archetype intent and project it into concrete bindings; provider
+adapters own subscription setup and provider authentication. AgentInput carries
+the resulting execution choice and opaque task data. Whether a generic binding
+CR belongs in this project or bindings remain integration-owned is the next API
+design question. Managed webhook setup is not an adopted controller capability.
+
+Bounded local inspection supports the separation: controller run types expose
+generic params/env/file mounts; `harness/cmd/migration-harness/main.go` resolves
+application/repository data through Hub; workflow stages copy parent labels
+generically. The sibling Hub checkout at `3fecffe` contains application repository
+data and archetype membership resolution (`internal/api/resource/application.go`
+and `internal/assessment/archetype.go`). No AgentRun creation path was found in
+the inspected Go sources there; ADR 0006's Hub integration remains a proposed
+contract rather than evidence of implementation in that checkout.
+
 **Resolved (2026-11-12):** A ready-for-review PR for this proposal must include
 a working PoC/demo against a real GitHub repository. Start with the PR-review
 AgentRun path, including source setup, a published review, subsequent commits,
