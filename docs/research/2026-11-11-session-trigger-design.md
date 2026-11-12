@@ -12,6 +12,7 @@ No new CRDs or source registrations are implemented here.
 - [Kubernetes event mechanisms](2026-11-11-agent-kubernetes-event-mechanisms.md): real Argo/Knative CR examples, provider-registration ownership, dependencies, and delivery limits.
 - [Advisory ingress](2026-11-11-agent-advisory-ingress.md): affected-repository alerts versus global advisories and the missing applicability step.
 - [Provider webhook lifecycle](2026-11-11-agent-webhook-lifecycle.md): GitHub and Jira registration/authentication distinctions.
+- [Kubernetes eventing conventions and Argo CD](2026-11-12-agent-kubernetes-eventing-standard.md): common event formats, reusable receivers/connectors, deployment notifications, and the unverified TPA integration.
 
 Existing-resource examples are verified against documentation, not executed.
 They are evidence for the design discussion, not a selected platform or a
@@ -92,6 +93,13 @@ must look like. A concrete notification experiment should inform the next design
 question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
+
+**Research update (2026-11-12):** Multiple ingestion paths should be evaluated
+against one durable input-admission contract. CloudEvents is an interoperability
+option; Argo Events and Knative are optional installed platforms. Argo CD can
+manage their configuration and emit deployment notifications. Camel's Jira
+connector is another candidate. No eventing dependency, connector, or public
+configuration shape has been selected.
 
 **Resolved (2026-11-11):** These are composable paths rather than exclusive
 architectures. An AgentSession can itself be the routing agent. Configured
