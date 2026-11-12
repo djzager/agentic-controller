@@ -22,6 +22,14 @@ relates_to:
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
 
+**Update (2026-11-12):** Resolve the configuration trust question: scheduling
+and publication policy comes from a trusted base revision, not changes proposed
+by the PR being reviewed. Repository overrides remain bounded by centrally
+enforced settings. Record the selected revision and effective policy with each
+input; merged configuration changes apply to later inputs, not retries of
+already accepted work. Exact field-level merge rules and configuration format
+remain open.
+
 **Update (2026-11-12):** New PR commits should normally request another review,
 with automatic review and treatment of older in-flight work configurable per
 repository/task binding. Repository-file overrides and centrally configured
@@ -374,8 +382,13 @@ recovery contract below.
 The proposed configuration boundary is the event-to-execution binding, which
 can express different behavior for different repositories/tasks even when they
 share a webhook endpoint. A repository file may supply permitted overrides or
-review guidance. Exact precedence, filename, trusted source revision, and which
-settings can be overridden remain open. Hub can project application choices
+review guidance. Scheduling and publication policy must use a trusted base
+revision; a PR cannot change its own policy merely by editing that file.
+Repository overrides cannot weaken centrally enforced settings. Pin the selected
+configuration commit and effective values on the input. Merging a configuration
+change makes it eligible for later inputs; it does not rewrite an existing
+input's policy. Exact field-level precedence, filename, and overridable settings
+remain open. Hub can project application choices
 into this configuration; the controller does not acquire an application model.
 
 Resolve dispatch-affecting settings in the provider/configuration adapter before
@@ -391,7 +404,7 @@ The [CodeRabbit research](../research/2026-11-12-agent-review-policy-coderabbit.
 provides examples of configurable automatic/incremental review, inherited policy,
 administrative overrides, and history-aware review behavior. It does not provide
 an exactly-once comment contract to inherit. Its documented use of feature-branch
-configuration is a product choice to evaluate, not an assumed trust model here.
+configuration is not the chosen trust model for our scheduling/publication policy.
 
 ### 6. Make delivery responsibility observable
 

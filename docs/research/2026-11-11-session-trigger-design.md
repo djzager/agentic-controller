@@ -95,11 +95,18 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Resolved (2026-11-12):** Scheduling and publication policy is read from a
+trusted base revision, with repository overrides bounded by centrally enforced
+settings. A PR cannot change its own policy by editing its configuration file.
+Record the effective policy and configuration revision with the input; merged
+changes apply to later inputs while retries retain the original selection.
+Exact fields and merge rules remain open.
+
 **Direction (2026-11-12):** New PR commits normally trigger review. Automatic
 review and treatment of older running reviews should be configurable per
 repository/task. Repository-file settings and defaults on the event-to-execution
-binding are candidates, with precedence and trusted configuration revision still
-open. Separate repeated event execution, repeated findings across reviews, and
+binding are candidates; the trust rule is resolved above, while exact field-level
+precedence remains open. Separate repeated event execution, repeated findings across reviews, and
 uncertain comment publication. Persistent review history can serve finite runs
 without requiring an AgentSession.
 

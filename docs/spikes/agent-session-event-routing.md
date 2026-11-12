@@ -146,8 +146,13 @@ that is superseded; cancellation must not silently delete its history.
 Record effective configuration and its source revision before dispatch. Change
 repository/binding settings and retry an older input: it must keep its original
 policy. A later input should receive the new applicable policy. Precedence and
-the branch/revision allowed to supply repository overrides are decisions to
-settle before implementing that resolver.
+field-level merge rules remain to be specified. Scheduling/publication settings
+must be read from a trusted base revision and bounded by central enforcement.
+Test a PR that edits its own configuration to disable review or permit obsolete
+publication: those edits must not alter its policy. After the configuration
+change is merged into the trusted base, a later input may use it, within central
+constraints. Verify the original input still retries with its recorded policy
+and that a repository override cannot weaken a centrally enforced setting.
 
 Also carry an unchanged finding across two review revisions. Verify the selected
 comment policy uses the prior thread/provider ID and preserves human discussion.
