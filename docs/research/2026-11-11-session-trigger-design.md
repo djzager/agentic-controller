@@ -1,5 +1,8 @@
 # AgentSession notification and decision mechanisms: research frame
 
+[Conversation handoff, 2026-11-13](../handoffs/agent-session-design.md): current
+decisions, unresolved questions, branch state, and the required live PoC.
+
 Date: 2026-11-11. Working material for a research-and-grilling session, not an
 accepted API design. The current [session ADR](../adr/0025-agent-sessions-and-event-routing.md)
 is a draft. Its bespoke receiver, SQLite prototype, and GitHub-first experiment
