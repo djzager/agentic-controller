@@ -95,6 +95,25 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Candidate mechanism (2026-11-13):** AgentInput can reference a Secret holding
+confidential task content, rather than embedding it in its ordinary fields.
+Existing AgentRun/AgentWorkflowRun `fileMounts` already project same-namespace
+Secret keys as read-only files. Input authorization, immutable-content identity,
+retention, replacement detection, and session delivery remain to be designed.
+Kubernetes supports [immutable Secrets](https://kubernetes.io/docs/concepts/configuration/secret/#immutable-secrets),
+but they can still be deleted/recreated; a name alone does not pin the input.
+This is a concrete option to evaluate, not a selected public schema or a claim
+that Secret mounting alone supplies embargo handling.
+
+**Required use case (2026-11-13):** Embargoed work must be able to enter the
+queue. Confidentiality is therefore an admission/delivery requirement for all
+AgentInput execution paths, not an optional CVE-specific feature of a session.
+Accepted restricted work must retain its protection through retries, dispatch,
+and derived outputs. The source of classification, protected payload mechanism,
+and isolated-session recommendation below remain open; the user has confirmed
+the use case, not those implementation choices. Do not equate metadata opacity
+with confidentiality or application membership with permission to receive it.
+
 **Open concern (2026-11-12): embargoed vulnerabilities.** Opaque task data is
 uninterpreted by the controller, not inherently confidential. Current run params
 are rendered into a ConfigMap (`internal/controller/agentrun_controller.go`,
@@ -113,7 +132,8 @@ to embargoed material can carry it into later ordinary work. A separate restrict
 run/session is the recommendation to discuss; namespace naming or a sensitivity
 label alone is not enforcement. Hub/security integrations can assign policy and
 release authority without requiring CVE semantics in the execution controller.
-No embargo-support guarantee, policy CRD, or release workflow is accepted here.
+The required use case was confirmed on 2026-11-13; an implemented embargo-support
+guarantee, policy CRD, or release workflow has not been established.
 
 **Clarified (2026-11-12):** The execution controller remains agnostic to
 applications, archetypes, repositories, and GitHub credentials. Hub/UI can own

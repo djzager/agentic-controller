@@ -5,10 +5,10 @@ description: "Proposes an event receiver/router, duplicate-safe input admission,
 status: proposed
 status_note: "Exploratory proposal. Must demonstrate value over direct AgentRun triggers and qualify ingress/recovery before API adoption."
 date: "2026-11-11"
-last_updated: "2026-11-12"
+last_updated: "2026-11-13"
 authors:
   - "David Zager"
-last_reviewed: "2026-11-12"
+last_reviewed: "2026-11-13"
 implementation_status: deferred
 review_note: "Webhook ingress, AgentRouter, AgentSession, and AgentInput are unimplemented. The spike must prove source registration/lifecycle, provider recovery, duplicate-safe admission, useful cross-input coordination, and correlated publication."
 relates_to:
@@ -21,6 +21,14 @@ relates_to:
 ---
 
 # ADR 0025: AgentSession — Durable Event Routing and Continuing Work
+
+**Update (2026-11-13):** Embargoed work entering the queue is a required use
+case. Admission, retained work, execution, and resulting artifacts must preserve
+the applicable confidentiality restrictions. Opaque parameters alone provide
+no confidentiality guarantee. The source of classification, payload storage,
+authorization enforcement, session isolation, and release process remain design
+questions; this amendment does not claim implemented support or select a new
+security-policy CRD.
 
 **Update (2026-11-12):** Clarify ownership before deciding webhook automation.
 Applications, archetypes, repository matching, and provider credential meaning
@@ -300,6 +308,56 @@ Lost credentials leave visible orphaned cleanup responsibility. Existing mode
 never deletes the external owner's registration.
 
 ## Event-to-input contract
+
+### Confidential inputs are part of the contract
+
+The queue must accommodate embargoed or otherwise restricted work for finite
+invocations as well as sessions. The controller remains domain-agnostic: the
+security integration identifies the applicable restrictions; the execution path
+must honor a generic authorization contract without interpreting CVE semantics.
+An application match alone is not authority to receive restricted input.
+
+Treat receipt storage, delivery plans, payloads, transcripts, workspace artifacts,
+child outcomes, and derived learnings as part of the confidentiality design.
+Ordinary CR parameters, object names, labels, condition messages, logs, and
+shared history must not become uncontrolled copies of protected content or
+sensitive associations. Inspectability applies to authorized readers, not every
+reader of an application's ordinary runs.
+
+A versioned protected-payload reference with minimum routing metadata is a
+candidate interface. The selected payload must remain recoverable under the
+retention/retry contract without putting access tokens or confidential content
+into ordinary input metadata. A reference is not itself authorization; qualify
+access at resolution and dispatch, including after restart. When an authorized
+execution path is unavailable, do not fall back to ordinary execution or public
+publication. Surface that condition only to the appropriate readers while
+preserving the accepted work's protection and recovery state.
+
+The first concrete payload option to evaluate is a same-namespace Kubernetes
+Secret reference, optionally selecting individual keys. The input holds the
+reference; confidential bytes stay out of ordinary input params and their
+generated ConfigMap. AgentRun/AgentWorkflowRun already support Secret-backed
+`fileMounts`, so finite execution can reuse that carrier after authorization.
+This does not mean the existing mount implementation supplies input admission,
+caller authorization, or session-time secret delivery; those remain new work.
+
+For retry stability, evaluate an immutable Secret with a recorded object identity
+and retention through the input's recovery lifetime. Kubernetes allows immutable
+Secrets to be deleted/recreated, so immutability alone does not pin a named
+reference. Qualify replacement detection and deletion/mount races; a mutable
+latest-value reference must not silently change the accepted request. Creating
+an AgentInput must not confer authority to mount any Secret its author names.
+Sensitive task content and credentials are separate concerns even when both use
+Secret objects. External protected artifacts can remain another future carrier;
+no particular reference field or storage backend has been accepted yet.
+
+Session memory makes destination eligibility a substantive decision: an input
+can affect future context after its original payload is no longer accessible.
+Separate restricted sessions/runs are the recommendation to evaluate, but have
+not been selected as the mechanism. Classification authority, handling of mixed
+sources, storage/isolation boundaries, allowed model and output destinations,
+and explicit release of derived results still require decisions. Labels,
+namespace names, or prompt instructions alone do not establish enforcement.
 
 ### 1. Authenticate and persist before acknowledging
 

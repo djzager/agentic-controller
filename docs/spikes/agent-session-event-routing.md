@@ -5,6 +5,12 @@ Status: proposed, 2026-11-11. Supports
 have run. This spike is independent of AgentLearning; use existing skills and
 static context until the session value is established.
 
+**Update (2026-11-13):** Embargoed input is a required design case. Add a
+synthetic restricted-input experiment to qualify the proposed admission and
+delivery interface. The real GitHub demonstration remains required; it must not
+use actual embargoed information as test data. Confidentiality mechanisms and
+classification authority are still to be selected, not implemented guarantees.
+
 **Update (2026-11-12):** The eventual ready-for-review proposal PR must contain
 an actual runnable PoC/demo with real GitHub evidence. A plan, fixture, slide
 deck, or hand-created AgentInput is not sufficient. This document currently
@@ -178,6 +184,33 @@ these must not be confused with duplicate webhook delivery. Preserve evidence
 of uncertain matching or publication rather than claiming universal comment
 deduplication. Run this experiment without an AgentSession to isolate the
 publication-history requirement from conversation continuity.
+
+### Required restricted-input experiment
+
+Before claiming the ingress interface handles restricted work, use synthetic
+sensitive content and distinct authorized/unauthorized caller and worker
+identities. Demonstrate protected durable acceptance, recovery after restart,
+and authorized execution. An ordinary application route must not consume the
+restricted input just because it matches the same application or repository.
+Exercise denied access or unavailable restricted execution: no fallback to an
+ordinary session, broader model destination, or public publisher is permitted.
+
+Inspect input/status metadata, receipt and route storage, logs, transcripts,
+workspace/results, and any shared-learning path for the synthetic content and
+its intended access controls. Test revoked access on retry and preservation of
+authorized recovery without retaining a bearer URL/token in ordinary metadata.
+Record the enforcement points and threat model; a label or namespace alone is
+not evidence of isolation. Qualify session-memory separation if sessions are
+included. Report partial coverage explicitly rather than calling this experiment
+production embargo support.
+
+Evaluate same-namespace Secret-backed input using the existing finite-run
+`fileMounts` carrier. Show that ordinary parameters/ConfigMaps contain only safe
+references, that an unauthorized input author cannot name an arbitrary Secret
+to obtain its contents, and that a retry receives the accepted payload version.
+Test deletion/recreation under the same Secret name and retain the payload for
+unfinished execution/recovery. Identify session-time delivery separately; current
+finite-run mounts do not implement that behavior.
 
 ## Gate 2: a session scenario that uses earlier state
 
