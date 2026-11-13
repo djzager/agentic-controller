@@ -14,6 +14,7 @@ No new CRDs or source registrations are implemented here.
 - [Provider webhook lifecycle](2026-11-11-agent-webhook-lifecycle.md): GitHub and Jira registration/authentication distinctions.
 - [Kubernetes eventing conventions and Argo CD](2026-11-12-agent-kubernetes-eventing-standard.md): common event formats, reusable receivers/connectors, deployment notifications, and the unverified TPA integration.
 - [CodeRabbit review policy](2026-11-12-agent-review-policy-coderabbit.md): configuration precedence, automatic rereviews, comment-history behavior, and the limits of documented publication guarantees.
+- [Grok Bot connections and Slack](2026-11-13-agent-connections-and-slack.md): tool authorization versus event triggers, requester/execution identity, conversation continuity, reply routes, and HTTP/Socket Mode transport.
 
 Existing-resource examples are verified against documentation, not executed.
 They are evidence for the design discussion, not a selected platform or a
@@ -94,6 +95,17 @@ must look like. A concrete notification experiment should inform the next design
 question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
+
+**Research update (2026-11-13):** Grok Bot distinguishes connected tool accounts,
+routine event triggers, requester identity, and thread replies. For our design,
+connection credentials and Secret-backed task content serve different purposes.
+A connection need not imply an event subscription, an allowed target session, or
+permission to publish to every audience. Slack Socket Mode is a concrete adapter
+option when public HTTP ingress is undesirable; it still needs durable input
+admission and reconnection/recovery. Service-owned versus requester-delegated
+execution authority is an open policy choice, potentially per binding. No new
+Connection CRD or Slack demo requirement has been selected; GitHub remains the
+first required live PoC.
 
 **Candidate mechanism (2026-11-13):** AgentInput can reference a Secret holding
 confidential task content, rather than embedding it in its ordinary fields.
