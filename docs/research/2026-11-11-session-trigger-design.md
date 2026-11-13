@@ -95,6 +95,26 @@ question rather than turn these candidate capabilities into requirements.
 
 ## Decision order for the grilling session
 
+**Open concern (2026-11-12): embargoed vulnerabilities.** Opaque task data is
+uninterpreted by the controller, not inherently confidential. Current run params
+are rendered into a ConfigMap (`internal/controller/agentrun_controller.go`,
+`createParamsConfigMap`), so that carrier alone is not a suitable confidentiality
+contract. Explore minimal input metadata with a versioned protected-payload
+reference and authorized runtime access; the receipt store and retained route
+plan must not become an unprotected copy. Object names/labels, transcripts,
+workspace artifacts, publication, model destinations, and shared learnings also
+need compatible access controls. Merely selecting a Kubernetes Secret does not
+establish the whole contract: [Kubernetes documents explicit RBAC and encryption
+requirements](https://kubernetes.io/docs/concepts/security/secrets-good-practices/).
+
+The key session question is whether restricted work must use a separate session
+and workspace, even for the same application. A continuing conversation exposed
+to embargoed material can carry it into later ordinary work. A separate restricted
+run/session is the recommendation to discuss; namespace naming or a sensitivity
+label alone is not enforcement. Hub/security integrations can assign policy and
+release authority without requiring CVE semantics in the execution controller.
+No embargo-support guarantee, policy CRD, or release workflow is accepted here.
+
 **Clarified (2026-11-12):** The execution controller remains agnostic to
 applications, archetypes, repositories, and GitHub credentials. Hub/UI can own
 application/archetype intent and project it into concrete bindings; provider
